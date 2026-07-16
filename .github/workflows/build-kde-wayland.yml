@@ -14,6 +14,7 @@ on:
           - 'Debian13'
           - 'Fedora43'
           - 'Fedora44'
+          - 'kali'
           - 'all'
       anland_ref:
         description: 'anland 仓库分支、标签或 commit'
@@ -57,9 +58,9 @@ jobs:
 
           case "${{ github.event.inputs.build_target }}" in
             all)
-              targets='["ubuntu2604","Debian13","Fedora43","Fedora44"]'
+              targets='["ubuntu2604","Debian13","Fedora43","Fedora44","kali"]'
               ;;
-            ubuntu2604|Debian13|Fedora43|Fedora44)
+            ubuntu2604|Debian13|Fedora43|Fedora44|kali)
               targets='["${{ github.event.inputs.build_target }}"]'
               ;;
             *)
@@ -121,6 +122,14 @@ jobs:
               echo "dest=anland-build/Fedora44" >> "$GITHUB_OUTPUT"
               echo "pkg_pattern=*.rpm" >> "$GITHUB_OUTPUT"
               ;;
+            kali)
+              # Kali rolling 的 kwin 版本与 Ubuntu 26.04 同为 6.6.5，
+              # 因此复用 ubuntu2604_v5 的构建脚本与补丁
+              echo "image=kalilinux/kali-rolling" >> "$GITHUB_OUTPUT"
+              echo "script=producers/kde/ubuntu2604_v5/build.sh" >> "$GITHUB_OUTPUT"
+              echo "dest=anland-build/kali" >> "$GITHUB_OUTPUT"
+              echo "pkg_pattern=*.deb" >> "$GITHUB_OUTPUT"
+              ;;
             *)
               echo "不支持的构建目标: $BUILD_TARGET" >&2
               exit 1
@@ -152,7 +161,7 @@ jobs:
 
               # 按发行版安装基础工具
               case "$BUILD_TARGET" in
-                Debian13|ubuntu2604)
+                Debian13|ubuntu2604|kali)
                   apt-get update
                   apt-get install -y --no-install-recommends \
                     git ca-certificates sudo \
@@ -177,6 +186,13 @@ jobs:
                 if [ -f /etc/apt/sources.list.d/debian.sources ]; then
                   sed -i "s/^Types: deb\$/Types: deb deb-src/" /etc/apt/sources.list.d/debian.sources
                 fi
+                apt-get update
+              fi
+
+              # Kali 使用传统单行 /etc/apt/sources.list 格式，
+              # 复制 deb 行为 deb-src 以便 apt-get source / build-dep 可用
+              if [ "$BUILD_TARGET" = "kali" ]; then
+                sed -i -E 's|^deb[[:space:]]+(.*)|deb \1\ndeb-src \1|' /etc/apt/sources.list
                 apt-get update
               fi
 
@@ -257,7 +273,7 @@ jobs:
           for artifact_dir in "${artifact_dirs[@]}"; do
             target="${artifact_dir##*/anland-pkgs-}"
             case "$target" in
-              ubuntu2604|Debian13|Fedora43|Fedora44)
+              ubuntu2604|Debian13|Fedora43|Fedora44|kali)
                 ;;
               *)
                 echo "不支持的构建产物目标: $target" >&2
