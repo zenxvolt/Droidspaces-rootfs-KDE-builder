@@ -66,6 +66,10 @@ RUN apt-get update && \
     # kali-linux-default：Kali 官方默认元包（渗透测试常用工具集）
     # 如需更小的体积可替换为 kali-linux-core；如需更全可替换为 kali-linux-large
     apt-get install -y --no-install-recommends kali-linux-default && \
+    # firefox-esr & burpsuite hanya "Recommends" (bukan "Depends") dari
+    # kali-linux-default, jadi ter-skip oleh --no-install-recommends di atas;
+    # install eksplisit agar tool GUI populer ini selalu ada
+    apt-get install -y --no-install-recommends firefox-esr burpsuite && \
     ############################################## KDE支持 ################################################
     # 最小化KDE
     if [ "$BUILD_KDE" = "min" ]; then \
@@ -280,6 +284,12 @@ EOF_RUN
 # ABI 向前兼容（Kali 的 glibc 版本 >= trixie），可直接复用
 RUN if [ "$ENABLE_mesa_ARG" = "true" ]; then \
         echo "--> [开启] 正在下载并安装最新版 Mesa 驱动..." && \
+        # 该 Mesa 构建针对 LLVM 19.1 编译（libLLVM.so.19.1），但压缩包是直接
+        # tar 解压到 / ，不经过 apt/dpkg，因此其依赖不会被自动安装；
+        # 显式安装 libllvm19，避免 Kali 滚动更新到更新的 LLVM 默认版本后
+        # 导致 GBM/DRI 因缺少 libLLVM.so.19.1 而无法打开
+        apt-get update && \
+        apt-get install -y --no-install-recommends libllvm19 && \
         URL=$(curl -s https://api.github.com/repos/lfdevs/mesa-for-android-container/releases/latest | \
         jq -r '.assets[] | select(.name | test("mesa-for-android-container_.*_debian_trixie_arm64\\.tar\\.gz")) | .browser_download_url' | head -1) && \
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then echo "获取下载链接失败，可能是触发了 GitHub API 速率限制"; exit 1; fi && \
