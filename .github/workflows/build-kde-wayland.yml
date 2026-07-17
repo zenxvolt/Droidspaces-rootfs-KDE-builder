@@ -189,10 +189,15 @@ jobs:
                 apt-get update
               fi
 
-              # Kali 使用传统单行 /etc/apt/sources.list 格式，
-              # 复制 deb 行为 deb-src 以便 apt-get source / build-dep 可用
+              # Kali 自 2026.2 起改用 DEB822 格式的 kali.sources 文件（旧版单行
+              # sources.list 已不存在），做法与 Debian 13 一致；同时保留旧格式
+              # 兼容分支，以防镜像版本回退
               if [ "$BUILD_TARGET" = "kali" ]; then
-                sed -i -E "s|^deb[[:space:]]+(.*)|deb \1\ndeb-src \1|" /etc/apt/sources.list
+                if [ -f /etc/apt/sources.list.d/kali.sources ]; then
+                  sed -i "s/^Types: .*/Types: deb deb-src/" /etc/apt/sources.list.d/kali.sources
+                elif [ -f /etc/apt/sources.list ]; then
+                  sed -i -E "s|^deb[[:space:]]+(.*)|deb \1\ndeb-src \1|" /etc/apt/sources.list
+                fi
                 apt-get update
               fi
 
