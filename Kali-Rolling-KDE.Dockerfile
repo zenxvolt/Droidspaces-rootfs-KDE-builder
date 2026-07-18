@@ -63,12 +63,10 @@ RUN apt-get update && \
     # Kali 官方密钥环（滚动源签名更新时避免 KEYEXPIRED）
     kali-archive-keyring && \
     ############################################## Kali 默认工具集 ################################################
-    # kali-linux-default：Kali 官方默认元包（渗透测试常用工具集）
-    # 如需更小的体积可替换为 kali-linux-core；如需更全可替换为 kali-linux-large
-    apt-get install -y --no-install-recommends kali-linux-default && \
-    # firefox-esr & burpsuite hanya "Recommends" (bukan "Depends") dari
-    # kali-linux-default, jadi ter-skip oleh --no-install-recommends di atas;
-    # install eksplisit agar tool GUI populer ini selalu ada
+    # kali-linux-core：Kali 官方核心元包（体积最小，仅包含基础系统）
+    # 如需完整渗透测试工具集，可在容器运行后执行：sudo apt install kali-linux-default
+    apt-get install -y --no-install-recommends kali-linux-core && \
+    # firefox-esr & burpsuite 是常用 GUI 工具，单独显式安装
     apt-get install -y --no-install-recommends firefox-esr burpsuite && \
     ############################################## KDE支持 ################################################
     # 最小化KDE
