@@ -74,22 +74,32 @@ RUN apt-get update && \
     # 最小化KDE
     if [ "$BUILD_KDE" = "min" ]; then \
         apt-get install -y --no-install-recommends \
-        dbus-x11 x11-xserver-utils fonts-noto-cjk fonts-noto-color-emoji kde-plasma-desktop pipewire pipewire-pulse wireplumber powerdevil kscreen plasma-pa ark kwin-x11 upower konsole \
-        dolphin kate kinfocenter mesa-utils pulseaudio-utils vulkan-tools  desktop-base dbus-user-session; \
+        dbus-x11 x11-xserver-utils fonts-noto fonts-noto-cjk fonts-noto-color-emoji kde-plasma-desktop pipewire pipewire-pulse wireplumber powerdevil kscreen plasma-pa ark kwin-x11 upower konsole \
+        dolphin kate kinfocenter mesa-utils pulseaudio-utils vulkan-tools  desktop-base dbus-user-session \
+        # Recommends plasma-desktop yang ke-skip akibat --no-install-recommends, tapi esensial & ringan
+        kmenuedit ksshaskpass kwrited libkf6kcmutils-bin \
+        # integrasi Firefox (media control, download notif, KDE Connect) + spell-check dasar
+        plasma-browser-integration webext-plasma-browser-integration hunspell-en-us; \
     fi && \
     # 精简KDE
     if [ "$BUILD_KDE" = "conc" ]; then \
         apt-get install -y --no-install-recommends \
-        dbus-x11 x11-xserver-utils fonts-noto-cjk fonts-noto-color-emoji kde-plasma-desktop pipewire pipewire-pulse wireplumber powerdevil kscreen plasma-pa ark kwin-x11 upower konsole \
+        dbus-x11 x11-xserver-utils fonts-noto fonts-noto-cjk fonts-noto-color-emoji kde-plasma-desktop pipewire pipewire-pulse wireplumber powerdevil kscreen plasma-pa ark kwin-x11 upower konsole \
         dolphin kate kinfocenter mesa-utils pulseaudio-utils vulkan-tools  desktop-base dbus-user-session aha clinfo dmidecode libdisplay-info-bin wayland-utils xserver-xorg \
         kfind plasma-systemmonitor filelight glmark2 systemsettings kde-config-screenlocker kio-extras xdg-user-dirs dolphin-plugins ffmpegthumbs kdegraphics-thumbnailers \
         kimageformat6-plugins webext-plasma-browser-integration libcanberra-pulse gstreamer1.0-plugins-base gstreamer1.0-plugins-good sound-theme-freedesktop chromium chromium-l10n \
-        systemsettings kde-config-screenlocker kio-extras xdg-user-dirs; \
+        systemsettings kde-config-screenlocker kio-extras xdg-user-dirs \
+        # Recommends plasma-desktop yang ke-skip akibat --no-install-recommends, tapi esensial & ringan
+        kmenuedit ksshaskpass kwrited libkf6kcmutils-bin libpam-kwallet5 plasma-browser-integration \
+        # aplikasi harian yang umum dipakai: screenshot, PDF viewer, software center, disk health
+        spectacle okular plasma-discover plasma-disks \
+        # spell-check dasar buat Firefox/Chromium
+        hunspell-en-us; \
     fi && \
     # mobile版KDE
     if [ "$BUILD_KDE" = "mobile" ]; then \
         apt-get install -y --no-install-recommends \
-        dbus-x11 x11-xserver-utils fonts-noto-cjk fonts-noto-color-emoji wayland-utils xserver-xorg dbus-user-session \
+        dbus-x11 x11-xserver-utils fonts-noto fonts-noto-cjk fonts-noto-color-emoji wayland-utils xserver-xorg dbus-user-session \
         plasma-nano plasma-mobile plasma-mobile-phone maliit-keyboard maliit-framework \
         kwin-wayland pipewire pipewire-pulse wireplumber powerdevil plasma-pa upower pulseaudio-utils \
         konsole dolphin kate kinfocenter mesa-utils vulkan-tools \
@@ -98,7 +108,11 @@ RUN apt-get update && \
         gstreamer1.0-plugins-base gstreamer1.0-plugins-good sound-theme-freedesktop libcanberra-pulse \
         polkit-kde-agent-1 libpam-systemd libpam-modules libpam-kwallet5 \
         breeze-icon-theme plasma-desktoptheme libqt6svg6 qt6-svg-plugins \
-        qml6-module-org-kde-kirigami qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates && \
+        qml6-module-org-kde-kirigami qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates \
+        # Recommends plasma-desktop yang ke-skip akibat --no-install-recommends, tapi esensial & ringan
+        kmenuedit ksshaskpass kwrited libkf6kcmutils-bin spectacle \
+        # integrasi Firefox (media control, download notif, KDE Connect) + spell-check dasar
+        plasma-browser-integration webext-plasma-browser-integration hunspell-en-us && \
         echo "--> [mobile] 正在移除 ModemManager (容器内无真实 modem 硬件，会导致开机卡住)..." && \
         apt-get purge -y --auto-remove modemmanager || true; \
     fi && \
