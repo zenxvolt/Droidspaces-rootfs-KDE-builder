@@ -1,0 +1,10 @@
+# Display bridge between the Waydroid composer and the Anland app.
+# Installed by the Droidspaces Waydroid rootfs builder.
+service anland-bridge /system/bin/anland-waydroid-bridge --config /system/etc/droidspaces-waydroid.conf
+    class core
+    user root
+    group root system graphics input
+    stdio_to_kmsg
+
+on early-init
+    start anland-bridge
