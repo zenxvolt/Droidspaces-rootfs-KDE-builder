@@ -1,0 +1,148 @@
+name: Build Waydroid RootFS (Android on Droidspaces via Anland)
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: "Android image: arm64_only runs on every ARM64 phone; arm64_32 adds 32-bit apps but needs a processor that still runs 32-bit code"
+        required: true
+        type: choice
+        default: arm64_only
+        options:
+          - arm64_only
+          - arm64_32
+          - both
+      system_type:
+        description: "VANILLA (no Google apps) or GAPPS (with Google apps, needs device registration with Google)"
+        required: true
+        type: choice
+        default: VANILLA
+        options:
+          - VANILLA
+          - GAPPS
+      publish_release:
+        description: Publish the result as a GitHub Release
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      build_id: ${{ steps.matrix.outputs.build_id }}
+    steps:
+      - id: matrix
+        env:
+          ABI: ${{ inputs.abi }}
+        run: |
+          case "$ABI" in
+            arm64_only) matrix='{"abi":["arm64_only"]}' ;;
+            arm64_32)   matrix='{"abi":["arm64_32"]}' ;;
+            both)       matrix='{"abi":["arm64_only","arm64_32"]}' ;;
+            *) echo "unknown abi: $ABI" >&2; exit 1 ;;
+          esac
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "build_id=$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.abi }} / ${{ inputs.system_type }}
+    needs: setup
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          # The static Wayland library is built from the distribution's source package.
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential meson ninja-build pkg-config git dpkg-dev file \
+            libwayland-dev libwayland-bin wayland-protocols libffi-dev \
+            curl unzip xz-utils python3
+
+      - name: Build the helper programs
+        run: |
+          set -euo pipefail
+          ./waydroid/build-tools.sh -o "$RUNNER_TEMP/tools" -w "$RUNNER_TEMP/tools-work"
+          file "$RUNNER_TEMP/tools/ds-waydroid-init" "$RUNNER_TEMP/tools/anland-waydroid-bridge"
+
+      - name: Test the display bridge
+        run: ./waydroid/tests/run-bridge-test.sh "$RUNNER_TEMP/tools" "$RUNNER_TEMP/tools-work"
+
+      - name: Build the rootfs
+        env:
+          ABI: ${{ matrix.abi }}
+          SYSTEM_TYPE: ${{ inputs.system_type }}
+        run: |
+          set -euo pipefail
+          case "$ABI" in
+            arm64_only) ota_arch=waydroid_arm64_only ;;
+            arm64_32)   ota_arch=waydroid_arm64 ;;
+          esac
+          sudo ./waydroid/build-waydroid-rootfs.sh \
+            -a "$ota_arch" -t "$SYSTEM_TYPE" \
+            -T "$RUNNER_TEMP/tools" -o "$RUNNER_TEMP/out"
+          sudo rm -rf "$RUNNER_TEMP/out/work"
+          cp "$RUNNER_TEMP"/out/*.tar.xz "$RUNNER_TEMP"/out/*.sha256 .
+          ls -lh ./*.tar.xz
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: waydroid-rootfs-${{ matrix.abi }}
+          path: |
+            *.tar.xz
+            *.sha256
+          compression-level: 0
+          retention-days: 3
+
+  release:
+    name: Publish Release
+    needs: [setup, build]
+    if: ${{ inputs.publish_release }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: waydroid-rootfs-*
+          merge-multiple: true
+
+      - name: Create the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: waydroid-rootfs-${{ needs.setup.outputs.build_id }}
+          SYSTEM_TYPE: ${{ inputs.system_type }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Waydroid's Android image packaged as a Droidspaces rootfs, shown through the Anland app."
+            echo
+            echo "- Import the \`.tar.xz\` in Droidspaces as a **sparse image** of 8 GB or more."
+            echo "- Enable **Anland Display** and privileged mode for the container."
+            echo "- \`arm64_only\` runs on every ARM64 phone. \`arm64_32\` also runs 32-bit apps but only starts on processors that still support 32-bit code."
+            echo
+            echo "Setup and troubleshooting: [docs/en/waydroid.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/en/waydroid.md)"
+            echo
+            echo '```'
+            cat ./*.sha256
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" ./*.tar.xz ./*.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Waydroid RootFS for Droidspaces ($SYSTEM_TYPE, ${TAG#waydroid-rootfs-})" \
+            --notes-file notes.md

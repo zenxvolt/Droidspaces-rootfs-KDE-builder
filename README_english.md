@@ -23,6 +23,7 @@ Subscribe to the rolling desktop feed in Droidspaces: [Chinese RootFS (GitHub)](
 - [Supported distributions and build options](docs/en/build-options.md)
 - [Desktop startup and Anland Wayland setup](docs/en/desktop-and-anland.md)
 - [TUI, USB, firmware, and local builds](docs/en/advanced-usage.md)
+- [Waydroid (Android) as a RootFS, shown through Anland — experimental](docs/en/waydroid.md)
 - [Script maintenance guide](scripts/README_english.md)
 
 ## Targets

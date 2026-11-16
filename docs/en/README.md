@@ -6,6 +6,7 @@
 - [Build options and distribution support](build-options.md)
 - [Desktop startup and Anland Wayland setup](desktop-and-anland.md)
 - [TUI, USB, firmware, and local builds](advanced-usage.md)
+- [Waydroid (Android) as a RootFS, shown through Anland — experimental](waydroid.md)
 - [Script maintenance guide](../../scripts/README_english.md)
 
 ## Screenshots

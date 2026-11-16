@@ -23,6 +23,7 @@
 - [发行版兼容性与构建选项](docs/zh/构建选项.md)
 - [桌面启动与 Anland Wayland 配置](docs/zh/桌面与Anland.md)
 - [TUI、USB、固件与本地构建](docs/zh/进阶使用.md)
+- [Waydroid（Android）作为 RootFS，通过 Anland 显示（实验性，英文文档）](docs/en/waydroid.md)
 - [脚本维护说明](scripts/README.md)
 
 ## 支持范围
