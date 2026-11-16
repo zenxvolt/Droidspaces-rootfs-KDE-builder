@@ -101,19 +101,46 @@ download() { # url, sha256, destination
   fi
   # SourceForge "…/files/<path>/download" pages redirect browsers; the plain
   # download host serves the same file to command-line tools.
-  local direct=""
   if [[ "$url" =~ ^https://sourceforge\.net/projects/([^/]+)/files/(.+)/download$ ]]; then
-    direct="https://downloads.sourceforge.net/project/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    url="https://downloads.sourceforge.net/project/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
   fi
-  local candidate
-  for candidate in $direct "$url"; do
-    echo "downloading $candidate"
-    if curl -fL --retry 3 --retry-delay 5 -o "$dest.part" "$candidate" &&
-       echo "$sum  $dest.part" | sha256sum -c --status; then
+  echo "downloading $url"
+
+  # Every request is redirected to a mirror picked at random, and some mirrors
+  # deliver only a few hundred kB/s. Many parallel connections spread the file
+  # over several mirrors; connections that crawl are dropped and retried.
+  if command -v aria2c >/dev/null; then
+    if aria2c --dir="$(dirname "$dest")" --out="$(basename "$dest").part" \
+         --max-connection-per-server=16 --split=16 --min-split-size=4M \
+         --lowest-speed-limit=100K --timeout=30 --connect-timeout=20 \
+         --max-tries=40 --retry-wait=2 --max-file-not-found=5 \
+         --file-allocation=none --allow-overwrite=true --auto-file-renaming=false \
+         --console-log-level=warn --summary-interval=30 --download-result=hide \
+         "$url" && echo "$sum  $dest.part" | sha256sum -c --status; then
+      rm -f "$dest.part.aria2"
       mv "$dest.part" "$dest"
       return
     fi
-    rm -f "$dest.part"
+    echo "aria2c did not deliver a correct file, trying curl" >&2
+    rm -f "$dest.part" "$dest.part.aria2"
+  fi
+
+  # Single connection: give up on a slow mirror and resume on the next one.
+  # The speed floor is dropped after a few rounds in case every mirror is slow.
+  local attempt
+  local -a floor
+  for attempt in $(seq 1 12); do
+    floor=()
+    [[ "$attempt" -le 8 ]] && floor=(--speed-limit 400000 --speed-time 20)
+    if curl -fL -C - --connect-timeout 20 "${floor[@]}" -o "$dest.part" "$url"; then
+      if echo "$sum  $dest.part" | sha256sum -c --status; then
+        mv "$dest.part" "$dest"
+        return
+      fi
+      echo "checksum mismatch, starting over" >&2
+      rm -f "$dest.part"
+    fi
+    sleep 2
   done
   die "download failed or checksum mismatch: $url"
 }
