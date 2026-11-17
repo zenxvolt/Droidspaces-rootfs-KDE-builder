@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -36,6 +37,9 @@
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/personality.h>
+#include <sys/prctl.h>
+#include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -427,6 +431,7 @@ struct settings {
     bool force_second_stage;
     bool keep_host_cmdline;
     bool ignore_errors;
+    bool unprotected;
 };
 
 static void write_properties(void)
@@ -529,6 +534,191 @@ static bool boot_loop_guard(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Protecting the phone from the guest                                       */
+/* ------------------------------------------------------------------------- */
+
+/* Android's boot scripts assume they own the machine: they tune the scheduler
+ * and the memory manager through /proc/sys, switch on kernel panics for hung
+ * tasks, rearrange the CPU groups, and init can even ask the kernel to crash
+ * through /proc/sysrq-trigger. On a normal Waydroid host LXC makes all of that
+ * read-only and removes a set of capabilities. In a privileged Droidspaces
+ * container nothing stops it, and "the machine" is the phone itself. The
+ * functions below rebuild LXC's protections (lxc.mount.auto = proc:mixed
+ * sys:ro, lxc.cap.keep) so the guest runs in the environment it was made for. */
+
+static unsigned long mount_flags_of(const char *path)
+{
+    struct statvfs vfs;
+    unsigned long flags = 0;
+    if (statvfs(path, &vfs) == 0) {
+        if (vfs.f_flag & ST_NOSUID) flags |= MS_NOSUID;
+        if (vfs.f_flag & ST_NODEV) flags |= MS_NODEV;
+        if (vfs.f_flag & ST_NOEXEC) flags |= MS_NOEXEC;
+    }
+    return flags;
+}
+
+static void make_read_only(const char *path)
+{
+    if (!exists(path))
+        return;
+    unsigned long flags = mount_flags_of(path);
+    if (mount(path, path, NULL, MS_BIND | MS_REC, NULL) < 0 ||
+        mount(NULL, path, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY | flags, NULL) < 0) {
+        WARN("%s: cannot make it read-only for Android: %s", path, strerror(errno));
+        return;
+    }
+    INFO("protect: %s is read-only for Android", path);
+}
+
+static bool read_first_line(const char *path, char *buf, size_t size)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    bool ok = fgets(buf, (int)size, f) != NULL;
+    fclose(f);
+    if (ok)
+        trim(buf);
+    return ok;
+}
+
+static bool write_text(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    ssize_t n = write(fd, text, strlen(text));
+    close(fd);
+    return n == (ssize_t)strlen(text);
+}
+
+/* The phone's own Android keeps its processes in legacy cgroup hierarchies
+ * (cpuset, cpu, blkio, memory). A container that sits at the root of one of
+ * them sees the phone's groups (top-app, background, ...) when it mounts that
+ * hierarchy, and the guest's boot scripts would rewrite them. Move into a
+ * group of our own in every such hierarchy and start a new cgroup namespace,
+ * so the guest only ever sees and changes its own subtree. */
+static void isolate_cgroups(void)
+{
+    FILE *f = fopen("/proc/self/cgroup", "r");
+    if (!f)
+        return;
+    const char *mp = "/tmp/.ds-waydroid-cgroup";
+    mkdir(mp, 0755);
+    char line[512];
+    int moved = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char *s = trim(line);
+        char *c1 = strchr(s, ':');
+        char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+        if (!c2)
+            continue;
+        *c2 = 0;
+        const char *controllers = c1 + 1;
+        const char *path = c2 + 1;
+        if (!*controllers || !strncmp(controllers, "name=", 5))
+            continue; /* the unified hierarchy and named ones need nothing */
+
+        bool is_cpuset = strstr(controllers, "cpuset") != NULL;
+        bool mounted = mount("none", mp, "cgroup", MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                             controllers) == 0;
+        if (!mounted && is_cpuset) {
+            /* Android mounts cpuset through its legacy filesystem type. */
+            mounted = mount("none", mp, "cpuset", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) == 0;
+        }
+        if (!mounted)
+            continue;
+
+        char parent[PATH_MAX], dir[PATH_MAX + 32], file[PATH_MAX + 64], value[256];
+        snprintf(parent, sizeof(parent), "%s%s", mp, strcmp(path, "/") ? path : "");
+        snprintf(dir, sizeof(dir), "%s/ds-waydroid", parent);
+        mkdir(dir, 0755);
+        if (is_cpuset) {
+            /* A new cpuset group has no CPUs until it is given some. */
+            static const char *const seeds[] = { "cpuset.cpus", "cpuset.mems", "cpus", "mems" };
+            for (size_t i = 0; i < sizeof(seeds) / sizeof(seeds[0]); i++) {
+                snprintf(file, sizeof(file), "%s/%s", parent, seeds[i]);
+                if (!read_first_line(file, value, sizeof(value)))
+                    continue;
+                snprintf(file, sizeof(file), "%s/%s", dir, seeds[i]);
+                write_text(file, value);
+            }
+        }
+        snprintf(file, sizeof(file), "%s/cgroup.procs", dir);
+        bool ok = write_text(file, "1");
+        if (!ok) {
+            snprintf(file, sizeof(file), "%s/tasks", dir);
+            ok = write_text(file, "1");
+        }
+        if (ok)
+            moved++;
+        else
+            WARN("cgroup %s: could not move into a group of our own: %s", controllers,
+                 strerror(errno));
+        umount2(mp, MNT_DETACH);
+    }
+    fclose(f);
+    rmdir(mp);
+    if (unshare(CLONE_NEWCGROUP) < 0)
+        WARN("cgroup: cannot start a new cgroup namespace: %s", strerror(errno));
+    else
+        INFO("protect: Android gets its own cgroup subtree (%d legacy hierarchies)", moved);
+}
+
+/* The capabilities Waydroid's LXC configuration keeps, plus CAP_SYS_BOOT: in a
+ * PID namespace a reboot only ends the container, and that is how Android's
+ * own "restart" and "power off" reach Droidspaces. Everything else (loading
+ * kernel modules, raw hardware access, ...) is given up for good. */
+static void drop_capabilities(void)
+{
+    static const int keep[] = {
+        0 /* chown */, 1 /* dac_override */, 2 /* dac_read_search */, 3 /* fowner */,
+        4 /* fsetid */, 5 /* kill */, 6 /* setgid */, 7 /* setuid */, 8 /* setpcap */,
+        10 /* net_bind_service */, 12 /* net_admin */, 13 /* net_raw */, 14 /* ipc_lock */,
+        18 /* sys_chroot */, 19 /* sys_ptrace */, 21 /* sys_admin */, 22 /* sys_boot */,
+        23 /* sys_nice */, 24 /* sys_resource */, 25 /* sys_time */, 27 /* mknod */,
+        30 /* audit_control */, 34 /* syslog */, 35 /* wake_alarm */, 36 /* block_suspend */,
+    };
+    uint64_t keep_mask = 0;
+    for (size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++)
+        keep_mask |= 1ULL << keep[i];
+
+    int last = 40;
+    char buf[32];
+    if (read_first_line("/proc/sys/kernel/cap_last_cap", buf, sizeof(buf)))
+        last = atoi(buf);
+    if (last < 0 || last > 63)
+        last = 40;
+    for (int cap = 0; cap <= last; cap++)
+        if (!(keep_mask & (1ULL << cap)))
+            prctl(PR_CAPBSET_DROP, cap, 0, 0, 0);
+    prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+
+    struct { uint32_t version; int pid; } header = { 0x20080522 /* v3 */, 0 };
+    struct { uint32_t effective, permitted, inheritable; } data[2];
+    if (syscall(SYS_capget, &header, data) == 0) {
+        for (int i = 0; i < 2; i++) {
+            uint32_t mask = (uint32_t)(keep_mask >> (32 * i));
+            data[i].effective &= mask;
+            data[i].permitted &= mask;
+            data[i].inheritable &= mask;
+        }
+        if (syscall(SYS_capset, &header, data) < 0)
+            WARN("capabilities: cannot reduce our own set: %s", strerror(errno));
+    }
+    INFO("protect: capabilities reduced to the set Waydroid uses");
+}
+
+static void protect_host(void)
+{
+    make_read_only("/proc/sys");
+    make_read_only("/proc/sysrq-trigger");
+    make_read_only("/sys");
+    isolate_cgroups();
+}
+
+/* ------------------------------------------------------------------------- */
 /* Handing over to Android                                                   */
 /* ------------------------------------------------------------------------- */
 
@@ -599,17 +789,84 @@ static void on_stop_signal(int signo)
     _exit(1);
 }
 
+static void report_file(const char *label, const char *path)
+{
+    char buf[256];
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    if (fgets(buf, sizeof(buf), f))
+        INFO("%s: %s", label, trim(buf));
+    fclose(f);
+}
+
+static void report_dir(const char *label, const char *path)
+{
+    char names[512] = "";
+    DIR *d = opendir(path);
+    if (!d) {
+        INFO("%s: absent", label);
+        return;
+    }
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.')
+            continue;
+        size_t used = strlen(names);
+        if (used + strlen(e->d_name) + 2 >= sizeof(names))
+            break;
+        snprintf(names + used, sizeof(names) - used, "%s%s", used ? " " : "", e->d_name);
+    }
+    closedir(d);
+    INFO("%s: %s", label, *names ? names : "(empty)");
+}
+
+/* A short description of the phone and of how Droidspaces set the container
+ * up. It goes to the container log on the host as well, so it survives a
+ * failed boot and tells whoever reads it what there is to work with. */
 static void describe_environment(void)
 {
     struct utsname u;
     if (uname(&u) == 0)
         INFO("kernel %s %s (%s)", u.sysname, u.release, u.machine);
     INFO("pid %d, uid %d", (int)getpid(), (int)getuid());
+    report_file("device", "/sys/devices/soc0/machine");
+    report_file("chip id", "/sys/devices/soc0/soc_id");
+    report_file("device (devicetree)", "/proc/device-tree/model");
+    report_file("gpu", "/sys/class/kgsl/kgsl-3d0/gpu_model");
+    report_file("memory", "/proc/meminfo");
+    {
+        FILE *f = fopen("/proc/self/status", "r");
+        char line[256];
+        while (f && fgets(line, sizeof(line), f))
+            if (!strncmp(line, "CapBnd:", 7))
+                INFO("capability bounding set: %s", trim(line + 7));
+        if (f)
+            fclose(f);
+    }
+    INFO("kernel settings (/proc/sys) writable: %s, /sys writable: %s",
+         access("/proc/sys/kernel/sysrq", W_OK) == 0 ? "yes" : "no",
+         access("/sys/kernel", W_OK) == 0 ? "yes" : "no");
     INFO("/run/display.sock (Anland): %s",
          exists("/run/display.sock") ? "present" : "MISSING - enable Anland Display in Droidspaces");
-    INFO("/dev/kgsl-3d0: %s, /dev/dri: %s", exists("/dev/kgsl-3d0") ? "present" : "absent",
-         exists("/dev/dri") ? "present" : "absent");
+    INFO("/dev/kgsl-3d0: %s", exists("/dev/kgsl-3d0") ? "present" : "absent");
+    report_dir("/dev/dri", "/dev/dri");
+    report_dir("/dev/dma_heap", "/dev/dma_heap");
+    INFO("/dev/ion: %s, /dev/ashmem: %s, binderfs in kernel: %s",
+         exists("/dev/ion") ? "present" : "absent", exists("/dev/ashmem") ? "present" : "absent",
+         exists("/sys/module/binder") || exists("/sys/module/binder_linux") ? "likely" : "unknown");
     INFO("/proc/pressure (PSI): %s", exists("/proc/pressure/memory") ? "present" : "absent");
+    {
+        FILE *f = fopen("/proc/self/cgroup", "r");
+        char line[256], all[1024] = "";
+        while (f && fgets(line, sizeof(line), f)) {
+            size_t used = strlen(all);
+            snprintf(all + used, sizeof(all) - used, "%s%s", used ? " | " : "", trim(line));
+        }
+        if (f)
+            fclose(f);
+        INFO("cgroups: %s", all);
+    }
 }
 
 int main(int argc, char **argv)
@@ -684,6 +941,8 @@ int main(int argc, char **argv)
                 settings.keep_host_cmdline = true;
             else if (!strcmp(s, "init.ignore_errors=1"))
                 settings.ignore_errors = true;
+            else if (!strcmp(s, "init.unprotected=1"))
+                settings.unprotected = true;
         }
         fclose(cfg);
     }
@@ -708,6 +967,13 @@ int main(int argc, char **argv)
             goto stuck;
         }
         WARN("%d problem(s) above, continuing anyway because init.ignore_errors=1", g_problems);
+    }
+
+    if (settings.unprotected) {
+        WARN("init.unprotected=1: Android can change the phone's kernel settings");
+    } else {
+        protect_host();
+        drop_capabilities(); /* last: everything above needs them */
     }
 
     INFO("preparation finished. Android's own messages go to the kernel log (dmesg)");
