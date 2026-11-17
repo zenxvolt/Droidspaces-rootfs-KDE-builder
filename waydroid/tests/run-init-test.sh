@@ -22,7 +22,14 @@ command -v "$DS" >/dev/null || { echo "droidspaces binary not found: $DS" >&2; e
 T="$(mktemp -d /tmp/dswi.XXXXXX)"
 R="$T/rootfs"
 NAME="dswi$$"
-cleanup() { (cd "$T" && "$DS" --name="$NAME" stop >/dev/null 2>&1) || true; rm -rf "$T"; }
+cleanup() {
+  (cd "$T" && "$DS" --name="$NAME" stop >/dev/null 2>&1) || true
+  if mountpoint -q "$T/host-cpuset" 2>/dev/null; then
+    rmdir "$T/host-cpuset/ds-waydroid"/* "$T/host-cpuset/ds-waydroid" "$T/host-cpuset"/dswi-host-group-* 2>/dev/null || true
+    umount "$T/host-cpuset" || true
+  fi
+  rm -rf "$T"
+}
 trap cleanup EXIT
 
 mkdir -p "$R"/{sbin,system/bin,system/etc,dev,proc,sys,tmp,run,data,vendor,mnt,debug_ramdisk,second_stage_resources}
@@ -31,6 +38,16 @@ ln -s /system/bin/init "$R/init"
 cc -O1 -static -o "$R/system/bin/init" "$SCRIPT_DIR/mock-android-init.c"
 install -m 0755 "$TOOLS_DIR/ds-waydroid-init" "$R/sbin/init"
 CONF="$R/system/etc/droidspaces-waydroid.conf"
+
+# A legacy cpuset hierarchy with a group in it, like the "top-app" group the
+# phone's own Android has. The guest must never get to see it.
+HOSTCG="$T/host-cpuset"
+HOST_GROUP="dswi-host-group-$$"
+HAVE_V1_CPUSET=0
+mkdir -p "$HOSTCG"
+if mount -t cgroup -o cpuset none "$HOSTCG" 2>/dev/null; then
+  mkdir -p "$HOSTCG/$HOST_GROUP" && HAVE_V1_CPUSET=1
+fi
 
 FAILED=0
 check() { local what="$1"; shift; if "$@"; then echo "  ok    $what"; else echo "  FAIL  $what"; FAILED=1; fi; }
@@ -65,6 +82,18 @@ common_checks() {
   check "properties were generated from the config" has "^prop ro.hardware.gralloc=default" "$MOCK"
   check "bridge settings are not leaked into properties" hasnt "^prop bridge\." "$MOCK"
   check "memfd is enabled when ashmem is absent" has "^prop sys.use_memfd=true" "$MOCK"
+  check "Android cannot change the host's kernel settings" has "^can change kernel settings (/proc/sys): no" "$MOCK"
+  check "Android cannot trigger sysrq (kernel crash, reboot)" has "^can trigger sysrq: no" "$MOCK"
+  check "Android cannot write to the host's /sys" has "^can write to /sys: no" "$MOCK"
+  # Bounding set: sys_module (bit 16) and sys_rawio (bit 17) gone, sys_admin (21) and sys_boot (22) kept.
+  check "module loading and raw hardware access are given up" bash -c "
+    v=\$(sed -n 's/^CapBnd:[[:space:]]*//p' '$MOCK'); [[ -n \"\$v\" ]] && (( (0x\$v & 0x30000) == 0 ))"
+  check "the capabilities Android needs are kept" bash -c "
+    v=\$(sed -n 's/^CapBnd:[[:space:]]*//p' '$MOCK'); [[ -n \"\$v\" ]] && (( (0x\$v & 0x600000) == 0x600000 ))"
+  if [[ "$HAVE_V1_CPUSET" -eq 1 ]]; then
+    check "Android can still mount the cpuset hierarchy" has "^cpuset groups visible:" "$MOCK"
+    check "the host's cpuset groups are hidden from Android" hasnt "^cpuset groups visible:.*$HOST_GROUP" "$MOCK"
+  fi
 }
 
 fresh_config() { # extra lines...
@@ -98,6 +127,24 @@ else
   boot
   check "the problem is reported" has "ERROR: binder: cannot mount binderfs" "$R/ds-waydroid-boot.log"
   check "Android is not started" hasnt "starting Android" "$R/ds-waydroid-boot.log"
+fi
+
+echo "== init.unprotected=1 leaves a privileged container as Droidspaces made it"
+fresh_config "init.unprotected=1"
+boot --privileged=full
+check "the warning is logged" has "init.unprotected=1" "$R/ds-waydroid-boot.log"
+# Proof that the "cannot" checks above are not passing by accident. /sys is used
+# because some test machines keep /proc/sys read-only themselves.
+if [[ -w /sys/kernel ]]; then
+  check "/sys is writable again (shows the checks above are real)" has "^can write to /sys: YES" "$R/mock-android-init.log"
+fi
+if [[ -w /proc/sys/kernel/sysrq ]]; then
+  check "kernel settings are writable again" has "^can change kernel settings (/proc/sys): YES" "$R/mock-android-init.log"
+else
+  echo "  note  this machine keeps /proc/sys read-only itself; that protection is only checked, not contrasted"
+fi
+if [[ "$HAVE_V1_CPUSET" -eq 1 ]]; then
+  check "the host's cpuset groups are visible again" has "^cpuset groups visible:.*$HOST_GROUP" "$R/mock-android-init.log"
 fi
 
 echo "== boot loop protection"

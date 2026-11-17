@@ -106,7 +106,7 @@ Once Android is up, `logcat` works from a shell in the container.
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** is off for this container. |
 | `cannot map Anland buffer` | This phone's screen buffers cannot be written by the CPU, which this bridge needs. |
 
-When reporting a problem, include the first two logs and the phone model, processor and kernel version (`uname -r`).
+When reporting a problem, the easiest way is the Droidspaces app's **Generate a bug report**. It writes one archive to the phone's storage with the container log (which holds the `/sbin/init` report), the kernel log, and the kernel's record of the last crash if the phone restarted.
 
 ## How it works
 
@@ -116,6 +116,18 @@ Waydroid normally needs its Python tools and LXC on a Linux host. Here two small
 - **`anland-waydroid-bridge`** is a minimal Wayland compositor. Waydroid's hardware composer is a Wayland client; the bridge accepts its frames, copies them into the buffer the Anland app selected and turns Anland input into Wayland input. It links Anland's `libdisplay_producer`, so the binary is GPL-3.0.
 
 Nothing in the Android image is modified; the files above are added to it.
+
+## How the phone is protected from the guest
+
+Android's boot scripts assume they own the machine. They tune the scheduler and memory manager through `/proc/sys`, switch on kernel panics for hung tasks, rearrange the CPU groups, and Android's init can ask the kernel to crash through `/proc/sysrq-trigger`. On a normal Waydroid host, LXC makes those read-only. In a privileged Droidspaces container nothing does, and "the machine" is the phone.
+
+`/sbin/init` therefore rebuilds LXC's protections before it starts Android:
+
+- `/proc/sys`, `/proc/sysrq-trigger` and `/sys` are read-only for Android;
+- Android gets a cgroup subtree of its own, so it cannot see or rewrite the phone's `top-app`, `background` and other groups;
+- the capabilities are reduced to the set Waydroid's LXC configuration keeps (no kernel modules, no raw hardware access).
+
+Rootfs archives built before this was added do not have these protections. Do not use them.
 
 ## What was tested
 

@@ -109,6 +109,41 @@ int main(int argc, char **argv)
         closedir(d);
     fprintf(out, "\n");
 
+    /* What the guest could do to the machine it runs on. Nothing is written:
+     * asking whether a write would be allowed is enough. */
+    fprintf(out, "can change kernel settings (/proc/sys): %s\n",
+            access("/proc/sys/kernel/sysrq", W_OK) == 0 ? "YES" : "no");
+    fprintf(out, "can trigger sysrq: %s\n",
+            access("/proc/sysrq-trigger", W_OK) == 0 ? "YES" : "no");
+    fprintf(out, "can write to /sys: %s\n", access("/sys/kernel", W_OK) == 0 ? "YES" : "no");
+    FILE *status = fopen("/proc/self/status", "r");
+    char sline[256];
+    while (status && fgets(sline, sizeof(sline), status))
+        if (!strncmp(sline, "CapBnd:", 7) || !strncmp(sline, "CapEff:", 7))
+            fprintf(out, "%s", sline);
+    if (status)
+        fclose(status);
+
+    /* Mount the legacy cpuset hierarchy the way Android does and list what is
+     * visible in it: groups of the host must not show up. */
+    mkdir("/mnt/cpuset-probe", 0755);
+    if (mount("none", "/mnt/cpuset-probe", "cgroup", 0, "cpuset") == 0 ||
+        mount("none", "/mnt/cpuset-probe", "cpuset", 0, NULL) == 0) {
+        fprintf(out, "cpuset groups visible:");
+        DIR *cg = opendir("/mnt/cpuset-probe");
+        struct dirent *ce;
+        while (cg && (ce = readdir(cg)))
+            if (ce->d_type == DT_DIR && ce->d_name[0] != '.')
+                fprintf(out, " %s", ce->d_name);
+        if (cg)
+            closedir(cg);
+        fprintf(out, "\n");
+        umount("/mnt/cpuset-probe");
+    } else {
+        fprintf(out, "cpuset groups visible: <cannot mount: %s>\n", strerror(errno));
+    }
+    cat("cgroup membership", "/proc/self/cgroup");
+
     FILE *prop = fopen("/vendor/waydroid.prop", "r");
     char line[256];
     while (prop && fgets(line, sizeof(line), prop))

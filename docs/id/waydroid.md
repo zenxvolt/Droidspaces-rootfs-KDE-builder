@@ -106,7 +106,7 @@ Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container.
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** mati untuk container ini. |
 | `cannot map Anland buffer` | Buffer layar ponsel ini tidak bisa ditulis oleh CPU, padahal jembatan ini membutuhkannya. |
 
-Saat melaporkan masalah, sertakan dua log pertama beserta model ponsel, prosesor, dan versi kernel (`uname -r`).
+Saat melaporkan masalah, cara termudah adalah **Generate a bug report** di aplikasi Droidspaces. Ia menulis satu arsip ke penyimpanan ponsel berisi log container (yang memuat laporan `/sbin/init`), log kernel, dan catatan kernel tentang crash terakhir bila ponsel sempat restart.
 
 ## Cara kerjanya
 
@@ -116,6 +116,18 @@ Waydroid biasanya butuh alat Python-nya dan LXC di host Linux. Di sini dua progr
 - **`anland-waydroid-bridge`** adalah compositor Wayland minimal. Hardware composer Waydroid adalah klien Wayland; jembatan ini menerima frame-nya, menyalinnya ke buffer yang dipilih aplikasi Anland, dan mengubah input Anland menjadi input Wayland. Program ini memakai `libdisplay_producer` milik Anland, jadi binernya berlisensi GPL-3.0.
 
 Tidak ada isi image Android yang diubah; berkas-berkas di atas hanya ditambahkan.
+
+## Cara ponsel dilindungi dari Android tamu
+
+Skrip boot Android menganggap dirinya pemilik mesin. Ia menyetel penjadwal dan pengelola memori lewat `/proc/sys`, menyalakan kernel panic untuk tugas yang macet, mengatur ulang grup CPU, dan init Android bisa meminta kernel untuk crash lewat `/proc/sysrq-trigger`. Di host Waydroid biasa, LXC membuat semua itu hanya-baca. Di container Droidspaces mode privileged tidak ada yang menahannya, dan "mesin" itu adalah ponsel Anda.
+
+Karena itu `/sbin/init` membangun ulang perlindungan LXC sebelum menjalankan Android:
+
+- `/proc/sys`, `/proc/sysrq-trigger`, dan `/sys` hanya-baca bagi Android;
+- Android mendapat subtree cgroup sendiri, sehingga tidak bisa melihat atau menulis ulang grup `top-app`, `background`, dan lainnya milik ponsel;
+- kapabilitas dikurangi menjadi kumpulan yang dipertahankan konfigurasi LXC Waydroid (tanpa modul kernel, tanpa akses hardware mentah).
+
+Arsip rootfs yang dibangun sebelum ini ditambahkan tidak punya perlindungan tersebut. Jangan dipakai.
 
 ## Apa yang sudah diuji
 
