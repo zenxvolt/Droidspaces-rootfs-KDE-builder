@@ -189,9 +189,10 @@ image_path() { # zip-or-img, wanted name -> path of the .img
   esac
 }
 
-# Android's file capabilities are kept; its SELinux labels are not: SELinux is
-# switched off inside Waydroid and the labels would only confuse the host.
-TAR_XATTRS=(--xattrs "--xattrs-include=security.capability")
+# Extended attributes are left out. Android's SELinux labels would only confuse
+# the host (SELinux is off inside Waydroid), and the Droidspaces app unpacks
+# with BusyBox tar, which is happiest with a plain archive.
+TAR_XATTRS=()
 
 copy_image() { # image, destination directory
   local img="$1" dest="$2"
@@ -221,6 +222,29 @@ copy_image "$VENDOR_IMG" "$ROOTFS/vendor"
 
 # --- 4. add the Droidspaces pieces ------------------------------------------
 log "Installing the Droidspaces integration"
+
+# The Droidspaces app only installs archives that look like a Linux rootfs:
+# bin, sbin, etc and usr must exist at the top. Android has no /usr.
+install -d -m 0755 -o 0 -g 0 "$ROOTFS/usr"
+
+# /etc, /bin, ... are absolute links into /system in the Android image. Tools
+# that work on the unpacked tree from outside (the app's post-install script
+# writes to <rootfs>/etc) would follow them into the host's own /system. A
+# relative link points to the same place inside Android and stays inside the
+# tree outside of it.
+for entry in "$ROOTFS"/*; do
+  [[ -L "$entry" ]] || continue
+  target="$(readlink "$entry")"
+  if [[ "$target" == /system/* ]]; then
+    ln -sfn "${target#/}" "$entry"
+    chown -h 0:0 "$entry"
+  fi
+done
+
+# Marks the app's Linux-specific post-install fixes as already done; none of
+# them apply to Android.
+echo "Waydroid rootfs: the Linux post-extraction fixes do not apply" > "$ROOTFS/system/etc/droidspaces"
+chmod 0644 "$ROOTFS/system/etc/droidspaces"
 install -d -m 0755 -o 0 -g 0 "$ROOTFS/sbin"
 install -m 0755 -o 0 -g 0 "$TOOLS_DIR/ds-waydroid-init" "$ROOTFS/sbin/init"
 install -m 0755 -o 0 -g 2000 "$TOOLS_DIR/anland-waydroid-bridge" "$ROOTFS/system/bin/anland-waydroid-bridge"
@@ -248,12 +272,19 @@ anland_revision=$ANLAND_REV
 EOF
 chmod 0644 "$ROOTFS/system/etc/os-release" "$ROOTFS/system/etc/droidspaces-waydroid-release"
 
+# The same rule the Droidspaces app applies before it installs an archive.
+for entry in bin sbin etc usr; do
+  [[ -e "$ROOTFS/$entry" || -L "$ROOTFS/$entry" ]] \
+    || die "the rootfs has no top-level $entry; the Droidspaces app would refuse it"
+done
+[[ -f "$ROOTFS/etc/os-release" ]] || die "/etc does not resolve inside the rootfs"
+
 # --- 5. pack -----------------------------------------------------------------
 # The label says what the tree really contains, also for images passed with -S.
 if [[ -e "$ROOTFS/system/bin/linker" ]]; then ABI_LABEL="arm64_32"; else ABI_LABEL="arm64_only"; fi
 ARCHIVE="$OUT_DIR/Waydroid-LineageOS-${LINEAGE_VERSION:-unknown}-${SYSTEM_TYPE}-${ABI_LABEL}-Droidspaces-Anland-${BUILD_DATE}.tar.xz"
 log "Packing $(basename "$ARCHIVE") (this takes a few minutes)"
-tar -C "$ROOTFS" --numeric-owner "${TAR_XATTRS[@]}" -cf - . | xz -T0 "-$XZ_LEVEL" > "$ARCHIVE.part"
+tar -C "$ROOTFS" --format=gnu --numeric-owner "${TAR_XATTRS[@]}" -cf - . | xz -T0 "-$XZ_LEVEL" > "$ARCHIVE.part"
 mv "$ARCHIVE.part" "$ARCHIVE"
 (cd "$OUT_DIR" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
 

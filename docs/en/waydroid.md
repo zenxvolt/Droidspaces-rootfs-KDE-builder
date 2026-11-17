@@ -50,7 +50,7 @@ sudo ./waydroid/build-waydroid-rootfs.sh
 
 ## 2. Install in Droidspaces
 
-1. Import the `.tar.xz` as a new container. Choose **sparse image** storage with a size of **8 GB or more**; Android keeps its data inside the rootfs.
+1. Import the `.tar.xz` as a new container. Choose **sparse image** storage with a size of **8 GB or more**; Android keeps its data inside the rootfs. Do not install it as a plain folder: Droidspaces itself warns that a rootfs folder on the phone's storage gets damaged by SELinux labelling.
 2. In the container settings:
    - turn **Anland Display** on;
    - turn **privileged mode** on with `nocaps` and `noseccomp`;
