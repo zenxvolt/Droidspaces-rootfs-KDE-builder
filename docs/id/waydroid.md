@@ -84,7 +84,7 @@ Android digambar oleh CPU, sehingga ponsel bekerja keras dan menjadi hangat. Ini
 - Di Android, **Settings → System → Developer options**, menyetel tiga skala animasi ke `0.5x` atau mati menghilangkan banyak pekerjaan menggambar.
 - Droidspaces bisa membatasi jatah prosesor untuk container (batas CPU di pengaturan container) bila ponsel terlalu panas.
 
-Akselerasi GPU belum tersedia. Driver GPU di dalam image Waydroid tidak bisa berbicara dengan GPU ponsel: driver Adreno-nya hanya mendukung antarmuka kernel Linux mainline, bukan antarmuka `kgsl` yang dipakai kernel ponsel, dan untuk Mali tidak ada driver terbuka sama sekali. Karena itu jalur GPU membutuhkan driver yang dibangun terpisah dan hanya mungkin di ponsel Snapdragon (Adreno).
+Akselerasi GPU belum tersedia. Driver GPU di dalam image Waydroid (Mesa) hanya berbicara lewat antarmuka grafis Linux mainline (DRM), yang tidak disediakan ponsel Snapdragon untuk GPU-nya: ponsel memakai `kgsl` (`/dev/kgsl-3d0`). Build Mesa dengan dukungan `kgsl` ada (opsi GPU Snapdragon pada rootfs desktop di repositori ini memakainya), jadi jalur yang berlaku untuk semua ponsel Adreno mungkin dibuat. Itu membutuhkan Mesa tersebut dibangun untuk Android, pengalokasi buffer yang cocok dengannya, dan penyalinan lewat GPU ke buffer Anland. Semuanya belum dikerjakan dan belum diuji. Untuk ponsel Mali, image memuat driver terbuka Panfrost, tetapi ia juga membutuhkan antarmuka mainline sedangkan kernel ponsel memakai antarmuka vendor, jadi jalur Mali belum diketahui mungkin atau tidak.
 
 ## 4. Bila tidak berjalan
 

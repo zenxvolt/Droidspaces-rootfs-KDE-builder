@@ -84,7 +84,7 @@ Android is drawn by the CPU, so the phone works hard and gets warm. This is the 
 - In Android, **Settings → System → Developer options**, setting the three animation scales to `0.5x` or off removes a lot of drawing.
 - Droidspaces can limit the processor share of the container (CPU limit in the container settings) if the phone gets too warm.
 
-GPU acceleration is not available yet. The GPU drivers inside the Waydroid image cannot talk to a phone's GPU: its Adreno driver only supports the mainline Linux kernel interface, not the `kgsl` interface phone kernels have, and there is no open driver for Mali at all. A GPU path therefore needs a separately built driver and is only possible on Snapdragon (Adreno) phones.
+GPU acceleration is not available yet. The GPU drivers inside the Waydroid image (Mesa) only speak the mainline Linux graphics interface (DRM), which a Snapdragon phone does not offer for its GPU: it uses `kgsl` (`/dev/kgsl-3d0`). Mesa builds with `kgsl` support exist (the Snapdragon GPU option of the desktop rootfses in this repository uses one), so a path that works on every Adreno phone is possible in principle. It needs that Mesa built for Android, a buffer allocator that works with it and a GPU copy into the Anland buffers. None of this is done or tested yet. For Mali phones the image contains the open Panfrost driver, but it also needs the mainline interface while phone kernels use a vendor one, so a Mali path is not known to be possible.
 
 ## 4. When it does not work
 
