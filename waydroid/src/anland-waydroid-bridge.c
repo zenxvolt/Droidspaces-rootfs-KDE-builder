@@ -147,6 +147,7 @@ struct bridge {
     struct wl_display *display;
     struct wl_event_loop *loop;
     struct wl_event_source *tick;
+    uint64_t tick_due_ms;
 
     /* Anland side */
     display_ctx *ctx;
@@ -186,6 +187,7 @@ struct bridge {
 
 static void maybe_present(struct bridge *b);
 static void send_toplevel_configure(struct surface *s);
+static void arm_tick(struct bridge *b, int ms);
 
 /* ------------------------------------------------------------------------- */
 /* Pixel copy                                                                */
@@ -227,6 +229,28 @@ static void convert_row(uint32_t *dst, const uint32_t *src, uint32_t n,
     } else {
         for (uint32_t x = 0; x < n; x++)
             dst[x] = to_rgba8888(src[x], false);
+    }
+}
+
+/* Whole-number enlargement (render_scale 50 -> every pixel becomes 2x2): no
+ * lookup table, and the loop is simple enough for the compiler to vectorise. */
+static void convert_row_repeat(uint32_t *dst, const uint32_t *src, uint32_t src_n,
+                               uint32_t factor, bool src_bgr_order, bool dst_10bit)
+{
+    if (factor == 2) {
+        for (uint32_t x = 0; x < src_n; x++) {
+            uint32_t c = dst_10bit ? to_rgba1010102(src[x], src_bgr_order)
+                                   : to_rgba8888(src[x], src_bgr_order);
+            dst[2 * x] = c;
+            dst[2 * x + 1] = c;
+        }
+        return;
+    }
+    for (uint32_t x = 0; x < src_n; x++) {
+        uint32_t c = dst_10bit ? to_rgba1010102(src[x], src_bgr_order)
+                               : to_rgba8888(src[x], src_bgr_order);
+        for (uint32_t k = 0; k < factor; k++)
+            *dst++ = c;
     }
 }
 
@@ -283,6 +307,15 @@ static bool copy_frame(struct bridge *b, struct wl_shm_buffer *shm, struct targe
             convert_row((uint32_t *)(dst + (size_t)y * dstride),
                         (const uint32_t *)(src + (size_t)y * sstride),
                         dw, src_bgr_order, dst_10bit);
+    } else if (dw % sw == 0 && dh % sh == 0 && dw / sw == dh / sh && dw / sw <= 8) {
+        const uint32_t factor = dw / sw;
+        for (uint32_t y = 0; y < sh; y++) {
+            uint8_t *first = dst + (size_t)y * factor * dstride;
+            convert_row_repeat((uint32_t *)first, (const uint32_t *)(src + (size_t)y * sstride),
+                               sw, factor, src_bgr_order, dst_10bit);
+            for (uint32_t k = 1; k < factor; k++)
+                memcpy(first + (size_t)k * dstride, first, (size_t)dw * 4);
+        }
     } else {
         if (!b->xmap || b->xmap_src_w != sw || b->xmap_dst_w != dw) {
             free(b->xmap);
@@ -772,6 +805,8 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r)
     struct bridge *b = s->bridge;
     (void)c;
 
+    if (!wl_list_empty(&s->pending_callbacks))
+        arm_tick(b, 16);
     wl_list_insert_list(s->frame_callbacks.prev, &s->pending_callbacks);
     wl_list_init(&s->pending_callbacks);
 
@@ -1040,6 +1075,7 @@ static void xdg_surface_get_toplevel(struct wl_client *c, struct wl_resource *r,
         return;
     s->toplevel = top;
     s->configure_sent = false;
+    arm_tick(s->bridge, 10);
     if (!s->bridge->top) {
         s->bridge->top = s;
         INFO("Android opened its display window");
@@ -1334,8 +1370,32 @@ static int on_tick(void *data)
         b->last_frames = b->frames;
     }
 
-    wl_event_source_timer_update(b->tick, 16);
+    /* Frames and input arrive as events on their own descriptors, so with a
+     * live session this timer is only a safety net and can be slow. Waking up
+     * 60 times a second for nothing would keep the phone's CPU from idling. */
+    int next;
+    s = b->top;
+    if (s && !wl_list_empty(&s->frame_callbacks))
+        next = 16;
+    else if (s && s->toplevel && !s->configure_sent)
+        next = 50;
+    else if (!b->session)
+        next = 100;
+    else
+        next = 500;
+    b->tick_due_ms = 0;
+    arm_tick(b, next);
     return 0;
+}
+
+/* Make sure the timer fires within ms from now; never postpones it. */
+static void arm_tick(struct bridge *b, int ms)
+{
+    uint64_t due = now_ms64() + (uint64_t)ms;
+    if (b->tick_due_ms && b->tick_due_ms <= due)
+        return;
+    b->tick_due_ms = due;
+    wl_event_source_timer_update(b->tick, ms);
 }
 
 static int on_signal(int signo, void *data)
@@ -1539,7 +1599,7 @@ int main(int argc, char **argv)
     wl_event_loop_add_signal(b->loop, SIGTERM, on_signal, b);
     wl_event_loop_add_signal(b->loop, SIGINT, on_signal, b);
     b->tick = wl_event_loop_add_timer(b->loop, on_tick, b);
-    wl_event_source_timer_update(b->tick, 1);
+    arm_tick(b, 1);
 
     INFO("ready: Wayland socket %s, Anland socket %s, default %dx%d, scale %d%%, max %d fps",
          path, c->anland_socket, c->default_width, c->default_height, c->render_scale,

@@ -67,13 +67,24 @@ One file inside the rootfs holds all settings: `/system/etc/droidspaces-waydroid
 
 | Setting | Meaning |
 | --- | --- |
-| `bridge.render_scale` | Percentage of the screen resolution Android renders at. `50` makes Android draw a quarter of the pixels, which is much faster; the picture is scaled up. |
+| `bridge.render_scale` | Percentage of the screen resolution Android renders at. The default `50` makes Android draw a quarter of the pixels; the picture is enlarged to fill the screen. `100` is full resolution. |
 | `bridge.ui_width_dp` | Chooses Android's density so the short screen side is this many dp. `400` looks like a normal phone; larger makes everything smaller. |
-| `bridge.max_fps` | Highest refresh rate reported to Android. |
+| `bridge.max_fps` | Highest frame rate Android may produce. Default `30`. |
 | `bridge.wait_for_display` | Seconds Android's display start waits for the Anland app before using the default size. |
 | other `key=value` lines | Android system properties. |
 
 For a running sparse-image container the rootfs is mounted on the phone under `/mnt/Droidspaces/<container name>/`.
+
+## Speed and heat
+
+Android is drawn by the CPU, so the phone works hard and gets warm. This is the main limitation of the current version.
+
+- The rootfs ships with `bridge.render_scale=50` and `bridge.max_fps=30`: Android draws a quarter of the pixels at half the frame rate. Raise them in the settings file for a sharper, smoother picture at the cost of heat.
+- The first start is the worst: Android compiles its apps once. Later starts are lighter.
+- In Android, **Settings → System → Developer options**, setting the three animation scales to `0.5x` or off removes a lot of drawing.
+- Droidspaces can limit the processor share of the container (CPU limit in the container settings) if the phone gets too warm.
+
+GPU acceleration is not available yet. The GPU drivers inside the Waydroid image cannot talk to a phone's GPU: its Adreno driver only supports the mainline Linux kernel interface, not the `kgsl` interface phone kernels have, and there is no open driver for Mali at all. A GPU path therefore needs a separately built driver and is only possible on Snapdragon (Adreno) phones.
 
 ## 4. When it does not work
 

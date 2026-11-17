@@ -110,6 +110,12 @@ check "Android was told half the screen size" grep -q "hwc: drawing at 360x640" 
 check "scaled picture fills the screen correctly" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
 check "touch is scaled to Android's coordinates" grep -q "hwc: touch down id=0 x=180 y=160 surface=ok" "$SCENARIO_DIR/hwc.log"
 
+# 2b. A scale that is not a whole number uses the general scaling path.
+scenario three-quarter-scale 720 1280 app_first --render_scale 75
+check "Android was told three quarters of the screen size" grep -q "hwc: drawing at 540x960" "$SCENARIO_DIR/hwc.log"
+check "scaled picture fills the screen correctly" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
+check "touch is scaled to Android's coordinates" grep -q "hwc: touch down id=0 x=270 y=240 surface=ok" "$SCENARIO_DIR/hwc.log"
+
 # 3. Android starts before the app; the app connects later with another size.
 scenario app-late 600 1000 hwc_first --wait_for_display 1 --default_width 480 --default_height 800
 check "Android starts at the default size" grep -q "hwc: drawing at 480x800" "$SCENARIO_DIR/hwc.log"
