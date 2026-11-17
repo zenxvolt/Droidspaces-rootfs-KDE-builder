@@ -67,13 +67,24 @@ Semua pengaturan ada di satu berkas di dalam rootfs: `/system/etc/droidspaces-wa
 
 | Pengaturan | Arti |
 | --- | --- |
-| `bridge.render_scale` | Persentase resolusi layar yang dipakai Android untuk menggambar. `50` membuat Android menggambar seperempat jumlah piksel sehingga jauh lebih cepat; gambarnya diperbesar kembali. |
+| `bridge.render_scale` | Persentase resolusi layar yang dipakai Android untuk menggambar. Bawaan `50` membuat Android menggambar seperempat jumlah piksel; gambarnya diperbesar hingga memenuhi layar. `100` berarti resolusi penuh. |
 | `bridge.ui_width_dp` | Memilih kepadatan layar Android supaya sisi pendek layar selebar sekian dp. `400` terlihat seperti ponsel biasa; angka lebih besar membuat semuanya lebih kecil. |
-| `bridge.max_fps` | Laju refresh tertinggi yang dilaporkan ke Android. |
+| `bridge.max_fps` | Laju frame tertinggi yang boleh dihasilkan Android. Bawaan `30`. |
 | `bridge.wait_for_display` | Berapa detik Android menunggu aplikasi Anland sebelum memakai ukuran bawaan. |
 | baris `kunci=nilai` lainnya | Properti sistem Android. |
 
 Untuk container sparse image yang sedang berjalan, rootfs terpasang di ponsel pada `/mnt/Droidspaces/<nama container>/`.
+
+## Kecepatan dan panas
+
+Android digambar oleh CPU, sehingga ponsel bekerja keras dan menjadi hangat. Ini keterbatasan utama versi sekarang.
+
+- Rootfs dikirim dengan `bridge.render_scale=50` dan `bridge.max_fps=30`: Android menggambar seperempat jumlah piksel pada setengah laju frame. Naikkan keduanya di berkas pengaturan bila ingin gambar lebih tajam dan halus, dengan akibat lebih panas.
+- Penyalaan pertama adalah yang terberat: Android mengompilasi aplikasinya sekali. Penyalaan berikutnya lebih ringan.
+- Di Android, **Settings → System → Developer options**, menyetel tiga skala animasi ke `0.5x` atau mati menghilangkan banyak pekerjaan menggambar.
+- Droidspaces bisa membatasi jatah prosesor untuk container (batas CPU di pengaturan container) bila ponsel terlalu panas.
+
+Akselerasi GPU belum tersedia. Driver GPU di dalam image Waydroid tidak bisa berbicara dengan GPU ponsel: driver Adreno-nya hanya mendukung antarmuka kernel Linux mainline, bukan antarmuka `kgsl` yang dipakai kernel ponsel, dan untuk Mali tidak ada driver terbuka sama sekali. Karena itu jalur GPU membutuhkan driver yang dibangun terpisah dan hanya mungkin di ponsel Snapdragon (Adreno).
 
 ## 4. Bila tidak berjalan
 
