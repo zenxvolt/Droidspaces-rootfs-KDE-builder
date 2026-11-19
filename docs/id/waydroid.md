@@ -151,7 +151,7 @@ Mesa di dalam image Waydroid hanya bisa berbicara dengan GPU lewat antarmuka Lin
 | `/vendor/lib64/hw/gralloc.gbm.so` | Menggantikan alokator Waydroid yang membutuhkan `/dev/dri`. Buffer grafis diambil dari dma-buf heap kernel, yang bisa diimpor GPU lewat KGSL dan dipetakan oleh bridge. |
 | `/vendor/bin/anland-gpu-copy` | Menyalin frame ke buffer Anland dengan GPU atas nama bridge. |
 
-Saat GPU dipilih, `/sbin/init` menyetel `ro.hardware.gralloc=gbm`, `ro.hardware.egl=kgsl`, dan `mesa.loader.driver.override=kgsl`. Menyetel salah satu properti tersebut di berkas pengaturan akan mengesampingkan pilihan otomatis.
+Saat GPU dipilih, `/sbin/init` menyetel `ro.hardware.gralloc=gbm`, `gralloc.gbm.legacy=true` (tanpa ini init Waydroid mengganti `gbm` dengan alokator minigbm miliknya yang butuh GPU DRM), `ro.hardware.egl=kgsl`, dan `mesa.loader.driver.override=kgsl`. Menyetel salah satu properti tersebut di berkas pengaturan akan mengesampingkan pilihan otomatis.
 
 Hardware composer Waydroid lalu menyerahkan setiap frame yang sudah jadi ke bridge sebagai dma-buf. Bridge sendiri adalah program statis tanpa driver GPU (ia harus berjalan sebelum Android menyala), jadi pada frame GPU pertama ia menjalankan `anland-gpu-copy`, yang ditautkan ke EGL Android. Helper ini mengimpor frame Android dan buffer layar aplikasi Anland sebagai EGL image, lalu menyalin dengan satu kali draw, sekaligus menskalakan gambar bila `render_scale` di bawah 100. Fence tanda selesai dari GPU dikembalikan ke bridge lalu diteruskan ke Anland, sama seperti backend KDE dan GNOME di rootfs Linux menyerahkan frame-nya: tidak ada pihak yang menunggu GPU di CPU. Bila helper gagal, bridge menyalin dengan CPU seperti pada mode CPU.
 

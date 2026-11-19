@@ -85,6 +85,7 @@ common_checks() {
   check "bridge settings are not leaked into properties" hasnt "^prop bridge\." "$MOCK"
   check "gpu settings are not leaked into properties" hasnt "^prop gpu\." "$MOCK"
   check "without the GPU driver files Android draws with the CPU" has "^prop ro.hardware.egl=swiftshader$" "$MOCK"
+  check "the dma-buf gralloc is only requested in GPU mode" hasnt "^prop gralloc.gbm.legacy=" "$MOCK"
   check "the GPU decision is explained in the boot log" has "^gpu: " "$BOOT"
   check "memfd is enabled by default" has "^prop sys.use_memfd=true$" "$MOCK"
   check "Android cannot change the host's kernel settings" has "^can change kernel settings (/proc/sys): no" "$MOCK"

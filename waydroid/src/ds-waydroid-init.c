@@ -610,6 +610,10 @@ static void write_properties(const struct settings *st, bool gpu)
      * file to pick its own defaults. */
     if (gpu) {
         count += default_property(out, "ro.hardware.gralloc", "gbm");
+        /* Waydroid's init replaces gralloc "gbm" with minigbm_gbm_mesa, which
+         * needs a DRM GPU (patch "init: Default to minigbm_gbm_mesa"). This
+         * keeps the dma-buf heap gralloc.gbm.so that works with KGSL. */
+        count += default_property(out, "gralloc.gbm.legacy", "true");
         count += default_property(out, "ro.hardware.egl", "kgsl");
         count += default_property(out, "mesa.loader.driver.override", "kgsl");
         if (st->gpu_vulkan)

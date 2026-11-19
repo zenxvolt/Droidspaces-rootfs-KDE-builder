@@ -151,7 +151,7 @@ The Mesa inside the Waydroid image only talks to GPUs through the mainline Linux
 | `/vendor/lib64/hw/gralloc.gbm.so` | Replaces Waydroid's allocator, which needs `/dev/dri`. Graphics buffers come from the kernel's dma-buf heap, which the GPU imports through KGSL and the bridge can map. |
 | `/vendor/bin/anland-gpu-copy` | Copies frames into the Anland buffer with the GPU for the bridge. |
 
-When the GPU is chosen, `/sbin/init` sets `ro.hardware.gralloc=gbm`, `ro.hardware.egl=kgsl` and `mesa.loader.driver.override=kgsl`. Setting any of these properties in the settings file overrides the automatic choice.
+When the GPU is chosen, `/sbin/init` sets `ro.hardware.gralloc=gbm`, `gralloc.gbm.legacy=true` (otherwise Waydroid's init swaps `gbm` for its minigbm allocator, which needs a DRM GPU), `ro.hardware.egl=kgsl` and `mesa.loader.driver.override=kgsl`. Setting any of these properties in the settings file overrides the automatic choice.
 
 Waydroid's composer then hands each finished frame to the bridge as a dma-buf. The bridge itself is a static program without a GPU driver (it has to run before Android is up), so on the first GPU frame it starts `anland-gpu-copy`, which is linked to Android's EGL. The helper imports Android's frame and the Anland app's screen buffers as EGL images and copies with one draw, scaling the picture when `render_scale` is below 100. It hands the GPU's render-done fence back to the bridge, which passes it to Anland, the same way the KDE and GNOME backends of the Linux rootfs images hand over their frames: nobody waits for the GPU on the CPU. If the helper fails, the bridge copies with the CPU, as in CPU mode.
 
