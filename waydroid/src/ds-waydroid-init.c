@@ -465,10 +465,11 @@ static void write_properties(void)
         }
         fclose(in);
     } else {
-        WARN("%s is missing, Android will start with its built-in defaults", CONFIG_PATH);
+        WARN("%s is missing; using default rootfs properties", CONFIG_PATH);
     }
-    /* Kernels without the old ashmem driver need Android to use memfd. */
-    if (!memfd_set && !exists("/dev/ashmem")) {
+    /* Hardware mode can expose /dev/ashmem even when Android services cannot
+     * open it. Use memfd by default on both kinds of host. */
+    if (!memfd_set) {
         fprintf(out, "sys.use_memfd=true\n");
         count++;
     }
@@ -928,8 +929,7 @@ int main(int argc, char **argv)
         WARN("/data: cannot make it a mount point: %s", strerror(errno));
 
     struct settings settings = { 0 };
-    /* The properties are written after /dev is rebuilt so the ashmem check
-     * sees what Android will see; read the init.* switches first. */
+    /* Read the init.* switches before rebuilding /dev. */
     FILE *cfg = fopen(CONFIG_PATH, "r");
     if (cfg) {
         char line[1024];

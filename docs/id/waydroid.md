@@ -105,6 +105,7 @@ Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container.
 | `Android was started 5 times within three minutes` | Android terus-menerus restart. Penyebabnya ada di `dmesg`. Penyalaan dihentikan sementara untuk menghemat baterai; jalankan container lagi untuk mencoba ulang. |
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** mati untuk container ini. |
 | `cannot map Anland buffer` | Buffer layar ponsel ini tidak bisa ditulis oleh CPU, padahal jembatan ini membutuhkannya. |
+| `gralloc: couldn't create ashmem` | Android gagal membuat buffer grafis. Build terbaru mengaktifkan `sys.use_memfd=true` secara bawaan, termasuk saat mode hardware menyediakan perangkat ashmem. Pada image lama, tambahkan `sys.use_memfd=true` ke `/system/etc/droidspaces-waydroid.conf` lalu mulai ulang container. |
 
 Log bridge mencatat tiga tahap. `Anland app connected` berarti bridge sudah memetakan buffer aplikasi. `received Android frame` berarti hardware composer Waydroid sudah mengirim frame. `presented the first Android frame to Anland` berarti bridge sudah menyalin frame dan membalas permintaan buffer Anland. Jika log berhenti di `Anland app connected`, periksa pesan hardware composer dan `SurfaceFlinger` di `logcat` dalam container.
 

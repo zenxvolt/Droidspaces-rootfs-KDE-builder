@@ -81,7 +81,7 @@ common_checks() {
   check "the Wayland socket directory exists" has "node /run/xdg  *directory" "$MOCK"
   check "properties were generated from the config" has "^prop ro.hardware.gralloc=default" "$MOCK"
   check "bridge settings are not leaked into properties" hasnt "^prop bridge\." "$MOCK"
-  check "memfd is enabled when ashmem is absent" has "^prop sys.use_memfd=true" "$MOCK"
+  check "memfd is enabled by default" has "^prop sys.use_memfd=true$" "$MOCK"
   check "Android cannot change the host's kernel settings" has "^can change kernel settings (/proc/sys): no" "$MOCK"
   check "Android cannot trigger sysrq (kernel crash, reboot)" has "^can trigger sysrq: no" "$MOCK"
   check "Android cannot write to the host's /sys" has "^can write to /sys: no" "$MOCK"
@@ -110,6 +110,19 @@ for mode in "" "--hw-access" "--privileged=full"; do
   common_checks
   check "Android's own first stage is used" has "first-stage result: passed" "$R/mock-android-init.log"
 done
+
+echo "== hardware access exposes an unusable ashmem node"
+mknod -m 000 "$T/unavailable-ashmem" c 1 3
+fresh_config
+boot --hw-access --bind="$T/unavailable-ashmem:/dev/ashmem"
+check "ashmem is visible to Android" has "^node /dev/ashmem  *char device$" "$R/mock-android-init.log"
+check "Android still uses memfd by default" has "^prop sys.use_memfd=true$" "$R/mock-android-init.log"
+
+echo "== explicit sys.use_memfd override"
+fresh_config "sys.use_memfd=false"
+boot
+check "an explicit override is kept" has "^prop sys.use_memfd=false$" "$R/mock-android-init.log"
+check "the default does not override it" hasnt "^prop sys.use_memfd=true$" "$R/mock-android-init.log"
 
 echo "== first stage emulated (init.stage=second)"
 fresh_config "init.stage=second"

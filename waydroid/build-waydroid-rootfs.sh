@@ -255,6 +255,7 @@ ANDROID_RELEASE="$(sed -n 's/^ro.build.version.release=//p' "$ROOTFS/system/buil
 LINEAGE_VERSION="$(sed -n 's/^ro.lineage.build.version=//p' "$ROOTFS/system/build.prop" | head -n1)"
 BUILD_DATE="$(date -u +%Y%m%d)"
 ANLAND_REV="$(cat "$TOOLS_DIR/anland-revision.txt" 2>/dev/null || echo unknown)"
+BUILDER_REV="$(git -C "$SCRIPT_DIR" rev-parse --verify HEAD 2>/dev/null || echo unknown)"
 
 # Lets Droidspaces show a sensible name for the container.
 cat > "$ROOTFS/system/etc/os-release" <<EOF
@@ -269,6 +270,7 @@ built=$BUILD_DATE
 system_image=$SYSTEM_NAME
 vendor_image=$VENDOR_NAME
 anland_revision=$ANLAND_REV
+builder_revision=$BUILDER_REV
 EOF
 chmod 0644 "$ROOTFS/system/etc/os-release" "$ROOTFS/system/etc/droidspaces-waydroid-release"
 

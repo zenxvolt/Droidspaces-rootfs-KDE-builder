@@ -83,7 +83,7 @@ int main(int argc, char **argv)
     static const char *const nodes[] = {
         "/dev/null", "/dev/zero", "/dev/kmsg", "/dev/random", "/dev/urandom", "/dev/ptmx",
         "/dev/pts/ptmx", "/dev/console", "/dev/binder", "/dev/hwbinder", "/dev/vndbinder",
-        "/dev/socket", "/run/xdg", "/run/display.sock", "/vendor/waydroid.prop", NULL
+        "/dev/socket", "/dev/ashmem", "/run/xdg", "/run/display.sock", "/vendor/waydroid.prop", NULL
     };
     for (int i = 0; nodes[i]; i++) {
         struct stat st;

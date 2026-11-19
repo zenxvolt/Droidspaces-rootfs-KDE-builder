@@ -105,6 +105,7 @@ Once Android is up, `logcat` works from a shell in the container.
 | `Android was started 5 times within three minutes` | Android keeps rebooting. The cause is in `dmesg`. Starting was paused to save the battery; start the container again to retry. |
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** is off for this container. |
 | `cannot map Anland buffer` | This phone's screen buffers cannot be written by the CPU, which this bridge needs. |
+| `gralloc: couldn't create ashmem` | Android could not allocate a graphics buffer. Current builds default to `sys.use_memfd=true` even when Hardware Access exposes an ashmem device. For an older image, add `sys.use_memfd=true` to `/system/etc/droidspaces-waydroid.conf` and restart the container. |
 
 Anland's display path records three milestones in the bridge log. `Anland app connected` confirms that the bridge mapped the app's buffers. `received Android frame` confirms that Waydroid's hardware composer submitted a frame. `presented the first Android frame to Anland` confirms that the bridge copied it and sent the render completion. If the log stops at `Anland app connected`, check the container's `logcat` for messages from the hardware composer and `SurfaceFlinger`.
 
