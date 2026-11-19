@@ -1,0 +1,6 @@
+# Falls back to CPU drawing when the GPU driver keeps crashing SurfaceFlinger.
+# A GPU fault also makes the phone's own screen stutter, so this must not go
+# on for long. See /system/etc/ds-gpu-guard.sh. Installed by the Droidspaces
+# Waydroid rootfs builder.
+on property:init.svc.surfaceflinger=restarting && property:ro.hardware.egl=kgsl
+    exec_background -- /system/bin/sh /system/etc/ds-gpu-guard.sh

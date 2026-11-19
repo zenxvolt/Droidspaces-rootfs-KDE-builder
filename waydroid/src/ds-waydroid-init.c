@@ -498,10 +498,29 @@ static void open_up_gpu_nodes(void)
 /* Decides whether Android draws with the Adreno GPU (Mesa freedreno on KGSL)
  * or with the CPU (SwiftShader). Runs after /dev was rebuilt, so it sees the
  * same devices Android will. */
+#define GPU_FAILED_PATH  "/data/ds-gpu-failed"
+#define GPU_CRASHES_PATH "/data/ds-gpu-crashes"
+
 static bool choose_gpu(const struct settings *st)
 {
+    /* Written by /system/etc/ds-gpu-guard.sh; counts crashes of this start. */
+    unlink(GPU_CRASHES_PATH);
+
     if (st->gpu_mode == GPU_OFF) {
         INFO("gpu: turned off with gpu.mode=off; Android draws with the CPU");
+        return false;
+    }
+    if (st->gpu_mode == GPU_AUTO && exists(GPU_FAILED_PATH)) {
+        char why[256] = "";
+        FILE *f = fopen(GPU_FAILED_PATH, "r");
+        if (f) {
+            if (!fgets(why, sizeof(why), f))
+                why[0] = 0;
+            fclose(f);
+        }
+        WARN("gpu: the GPU driver failed before: %s", *why ? trim(why) : "(no details)");
+        WARN("gpu: Android draws with the CPU. Delete %s in the rootfs, or set gpu.mode=on,", GPU_FAILED_PATH);
+        WARN("gpu: to try the GPU again.");
         return false;
     }
 
