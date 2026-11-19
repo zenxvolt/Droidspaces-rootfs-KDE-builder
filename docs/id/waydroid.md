@@ -114,7 +114,7 @@ Jawabannya ada di tiga tempat, sesuai urutan kejadian:
 | `dmesg` di ponsel (sebagai root) | Pesan awal dari Android sendiri, baris berawalan `init:`. Baris berawalan `anland-bridge` berasal dari jembatan tampilan. |
 | `/ds-waydroid-bridge.log` di dalam rootfs | Jembatan tampilan: apakah aplikasi Anland tersambung dan pada ukuran berapa. |
 
-Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container.
+Setelah Android menyala, log-nya juga ditulis ke `/data/ds-waydroid-logcat.txt` di dalam rootfs (untuk container sparse image yang sedang berjalan: `/mnt/Droidspaces/<nama container>/data/ds-waydroid-logcat.txt`), jadi bisa dibaca dari ponsel tanpa masuk ke container.
 
 | Pesan | Arti |
 | --- | --- |

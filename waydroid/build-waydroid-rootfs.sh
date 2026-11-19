@@ -254,6 +254,7 @@ install -d -m 0755 -o 0 -g 0 "$ROOTFS/sbin"
 install -m 0755 -o 0 -g 0 "$TOOLS_DIR/ds-waydroid-init" "$ROOTFS/sbin/init"
 install -m 0755 -o 0 -g 2000 "$TOOLS_DIR/anland-waydroid-bridge" "$ROOTFS/system/bin/anland-waydroid-bridge"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/anland-bridge.rc" "$ROOTFS/system/etc/init/anland-bridge.rc"
+install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/ds-logcat.rc" "$ROOTFS/system/etc/init/ds-logcat.rc"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/droidspaces-waydroid.conf" "$ROOTFS/system/etc/droidspaces-waydroid.conf"
 
 # LineageOS registers a physical button shortcut for bugreport. Android init
