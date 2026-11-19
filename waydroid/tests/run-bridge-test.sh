@@ -40,6 +40,8 @@ cc -O1 -I"$T" -o "$T/fake-hwc" "$SCRIPT_DIR/fake-waydroid-hwc.c" "$T/xdg-shell-p
   "$T/linux-dmabuf-unstable-v1-protocol.c" \
   $(pkg-config --cflags --libs wayland-client)
 
+cc -O1 -I"$SCRIPT_DIR/../src" -o "$T/fake-gpu-copy" "$SCRIPT_DIR/fake-gpu-copy.c"
+
 FAILED=0
 check() { # description, command...
   local what="$1"; shift
@@ -127,7 +129,46 @@ check "the composer used dma-buf buffers" grep -q "hwc: GPU mode" "$SCENARIO_DIR
 check "the bridge saw a GPU frame" grep -q "dmabuf format 0x34324241, drawn by the GPU" "$SCENARIO_DIR/bridge.log"
 check "GPU picture arrives with correct colours" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
 
-# 2d. "auto" settings follow the drawing mode.
+# 2d. GPU mode with the GPU copy helper (a CPU stand-in here) and render fences.
+FAKE_HWC_DMABUF=1 scenario gpu-copy 720 1280 app_first --render_scale 50 --gpu_copy 1 \
+  --gpu_copy_helper "$T/fake-gpu-copy"
+check "the GPU copy helper started" grep -q "GPU copy: Android's frames are copied to Anland by the GPU" "$SCENARIO_DIR/bridge.log"
+check "frames were copied by the helper" grep -q "presented the first Android frame to Anland (copied by the GPU)" "$SCENARIO_DIR/bridge.log"
+check "the helper's picture is correct" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
+check "render fences reach the Anland app" grep -qE "received 40 frames, [1-9][0-9]* with a render fence" "$SCENARIO_DIR/app.log"
+check "buffers Android drops are dropped by the helper too" grep -q "fake-gpu-copy: forgot source" "$SCENARIO_DIR/bridge.out"
+check "the helper never fell back" bash -c "! grep -q 'GPU copy turned off' '$SCENARIO_DIR/bridge.log'"
+
+# 2e. The helper fails in the middle; the CPU takes over without a gap.
+FAKE_HWC_DMABUF=1 FAKE_GPU_COPY_FAIL=copy scenario gpu-copy-fails 720 1280 app_first \
+  --render_scale 100 --gpu_copy 1 --gpu_copy_helper "$T/fake-gpu-copy"
+check "the failure is reported" grep -q "GPU copy turned off (pretend the GPU hung)" "$SCENARIO_DIR/bridge.log"
+check "the CPU continues with a correct picture" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
+
+# 2f. No helper installed: the CPU copies from the start.
+FAKE_HWC_DMABUF=1 scenario gpu-copy-missing 720 1280 app_first --render_scale 100 --gpu_copy 1 \
+  --gpu_copy_helper /nonexistent/anland-gpu-copy
+check "the missing helper is reported" grep -q "GPU copy turned off (/nonexistent/anland-gpu-copy is missing)" "$SCENARIO_DIR/bridge.log"
+check "the CPU copies with a correct picture" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
+check "frames were copied by the CPU" grep -q "presented the first Android frame to Anland (copied by the CPU)" "$SCENARIO_DIR/bridge.log"
+
+# 2h. The real anland-gpu-copy, on Mesa's software renderer (llvmpipe imports
+# the memfd "dma-bufs" by mapping them). Checks EGL set-up, buffer import,
+# scaling, colour order and orientation of the actual helper.
+if pkg-config --exists egl glesv2; then
+  cc -O1 -I"$SCRIPT_DIR/../src" -o "$T/anland-gpu-copy" "$SCRIPT_DIR/../gpu/anland-gpu-copy.c" \
+    $(pkg-config --cflags --libs egl glesv2)
+  EGL_PLATFORM=surfaceless FAKE_HWC_DMABUF=1 scenario real-gpu-copy 720 1280 app_first \
+    --render_scale 50 --gpu_copy 1 --gpu_copy_helper "$T/anland-gpu-copy"
+  check "the real helper started" grep -q "GPU copy: Android's frames are copied to Anland by the GPU" "$SCENARIO_DIR/bridge.log"
+  check "frames were copied by the real helper" grep -q "presented the first Android frame to Anland (copied by the GPU)" "$SCENARIO_DIR/bridge.log"
+  check "the real helper's picture is correct" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
+  check "the real helper never fell back" bash -c "! grep -q 'GPU copy turned off' '$SCENARIO_DIR/bridge.log'"
+else
+  echo "== real-gpu-copy skipped (no EGL/GLES development files)"
+fi
+
+# 2g. "auto" settings follow the drawing mode.
 scenario auto-cpu 720 1280 app_first --render_scale auto --max_fps auto --gpu 0
 check "auto uses half the resolution when the CPU draws" grep -q "hwc: drawing at 360x640" "$SCENARIO_DIR/hwc.log"
 check "auto limits to 30 fps when the CPU draws" grep -q "scale 50%, max 30 fps" "$SCENARIO_DIR/bridge.log"

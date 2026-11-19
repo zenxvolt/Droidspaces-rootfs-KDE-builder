@@ -83,6 +83,7 @@ Semua pengaturan ada di satu berkas di dalam rootfs: `/system/etc/droidspaces-wa
 | `bridge.render_scale` | Persentase resolusi layar yang dipakai Android untuk menggambar. `auto` (bawaan) berarti `100` dengan GPU dan `50` dengan CPU. `50` menggambar seperempat jumlah piksel lalu memperbesarnya, sehingga terlihat buram. |
 | `bridge.ui_width_dp` | Memilih kepadatan layar Android supaya sisi pendek layar selebar sekian dp. `400` terlihat seperti ponsel biasa; angka lebih besar membuat semuanya lebih kecil. |
 | `bridge.max_fps` | Laju frame tertinggi yang boleh dihasilkan Android. `auto` (bawaan) berarti `60` dengan GPU dan `30` dengan CPU. |
+| `bridge.gpu_copy` | Siapa yang menyalin frame Android ke buffer Anland. `auto` (bawaan) menyerahkannya ke GPU bila Android menggambar dengan GPU. `0` selalu memakai CPU. |
 | `bridge.wait_for_display` | Berapa detik Android menunggu aplikasi Anland sebelum memakai ukuran bawaan. |
 | baris `kunci=nilai` lainnya | Properti sistem Android. |
 
@@ -92,7 +93,7 @@ Untuk container sparse image yang sedang berjalan, rootfs terpasang di ponsel pa
 
 Cara Android menggambar menentukan hampir semuanya:
 
-- **Dengan GPU** (ponsel Snapdragon, Hardware Access menyala), Android menggambar pada resolusi layar penuh sampai 60 fps. CPU tetap menyalin setiap frame yang sudah jadi ke buffer aplikasi Anland, yang memakan sedikit baterai pada resolusi tinggi. Bila ponsel terasa hangat, setel `bridge.render_scale=75` atau `bridge.max_fps=45`.
+- **Dengan GPU** (ponsel Snapdragon, Hardware Access menyala), Android menggambar pada resolusi layar penuh sampai 60 fps, dan GPU juga yang menyalin setiap frame yang sudah jadi ke buffer aplikasi Anland, sehingga CPU nyaris diam saat layar diperbarui. Bila ponsel terasa hangat, setel `bridge.max_fps=45` atau `bridge.render_scale=75` (GPU lalu memperbesar gambarnya dengan halus).
 - **Dengan CPU** (ponsel lain, atau `gpu.mode=off`), SwiftShader menggambar setiap piksel. Karena itu rootfs lalu hanya menggambar seperempat jumlah piksel (`render_scale` 50) pada 30 fps: gambarnya buram dan animasinya patah-patah, tetapi ponsel tetap bisa dipakai. Naikkan keduanya di berkas pengaturan bila ingin gambar lebih tajam dan halus, dengan akibat lebih panas.
 
 Pada kedua mode:
@@ -101,7 +102,7 @@ Pada kedua mode:
 - Di Android, **Settings → System → Developer options**, menyetel tiga skala animasi ke `0.5x` atau mati menghilangkan banyak pekerjaan menggambar.
 - Droidspaces bisa membatasi jatah prosesor untuk container (batas CPU di pengaturan container) bila ponsel terlalu panas.
 
-`/ds-waydroid-boot.log` mencatat mode mana yang dipilih (baris berawalan `gpu:`), dan `/ds-waydroid-bridge.log` menulis `drawn by the GPU` atau `drawn by the CPU` saat frame pertama datang.
+`/ds-waydroid-boot.log` mencatat mode mana yang dipilih (baris berawalan `gpu:`). `/ds-waydroid-bridge.log` menulis `drawn by the GPU` atau `drawn by the CPU` saat frame pertama datang, dan `copied by the GPU` atau `copied by the CPU` saat frame itu sampai di Anland.
 
 ## 4. Bila tidak berjalan
 
@@ -124,6 +125,7 @@ Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container.
 | `cannot map Anland buffer` | Buffer layar ponsel ini tidak bisa ditulis oleh CPU, padahal jembatan ini membutuhkannya. |
 | `gpu: there is no /dev/kgsl-3d0` | Android menggambar dengan CPU. Di ponsel Snapdragon, nyalakan **Hardware Access** di pengaturan container. |
 | `gpu: no dma-buf heap ... can be opened` | Kernel tidak punya `/dev/dma_heap/system` maupun `/dev/ion`, atau Hardware Access tidak meneruskannya. Android menggambar dengan CPU. |
+| `GPU copy turned off (...)` di log bridge | GPU tidak bisa menyalin frame ke buffer Anland, dengan alasan di dalam kurung. CPU yang menyalin sebagai gantinya, jadi gambar tetap tampil tetapi lebih boros baterai. Mohon laporkan pesannya. |
 | Layar hitam atau Android terus restart setelah beralih ke GPU | Setel `gpu.mode=off` di berkas pengaturan untuk kembali ke penggambaran CPU, lalu kirim baris `logcat` dari `SurfaceFlinger`, `libEGL`, `MESA`, dan `gralloc.dmaheap`. |
 | `gralloc: couldn't create ashmem` | Android gagal membuat buffer grafis. Build terbaru mengaktifkan `sys.use_memfd=true` secara bawaan, termasuk saat mode hardware menyediakan perangkat ashmem. Pada image lama, tambahkan `sys.use_memfd=true` ke `/system/etc/droidspaces-waydroid.conf` lalu mulai ulang container. |
 
@@ -147,8 +149,13 @@ Mesa di dalam image Waydroid hanya bisa berbicara dengan GPU lewat antarmuka Lin
 | `/vendor/lib64/egl/libEGL_kgsl.so`, `libGLESv1_CM_kgsl.so`, `libGLESv2_kgsl.so`, `/vendor/lib64/libgallium_kgsl.so` | OpenGL ES: Mesa freedreno di atas KGSL. Patch kecil (`waydroid/gpu/mesa-egl-android-kgsl.patch`) membuat platform EGL Android milik Mesa bisa membuka `/dev/kgsl-3d0`. |
 | `/vendor/lib64/hw/vulkan.kgsl.so` | Vulkan: Mesa turnip di atas KGSL (hanya dengan `gpu.vulkan=1`). |
 | `/vendor/lib64/hw/gralloc.gbm.so` | Menggantikan alokator Waydroid yang membutuhkan `/dev/dri`. Buffer grafis diambil dari dma-buf heap kernel, yang bisa diimpor GPU lewat KGSL dan dipetakan oleh bridge. |
+| `/vendor/bin/anland-gpu-copy` | Menyalin frame ke buffer Anland dengan GPU atas nama bridge. |
 
-Saat GPU dipilih, `/sbin/init` menyetel `ro.hardware.gralloc=gbm`, `ro.hardware.egl=kgsl`, dan `mesa.loader.driver.override=kgsl`. Hardware composer Waydroid lalu menyerahkan setiap frame yang sudah jadi ke bridge sebagai dma-buf, dan bridge menyalinnya ke buffer Anland. Menyetel salah satu properti tersebut di berkas pengaturan akan mengesampingkan pilihan otomatis.
+Saat GPU dipilih, `/sbin/init` menyetel `ro.hardware.gralloc=gbm`, `ro.hardware.egl=kgsl`, dan `mesa.loader.driver.override=kgsl`. Menyetel salah satu properti tersebut di berkas pengaturan akan mengesampingkan pilihan otomatis.
+
+Hardware composer Waydroid lalu menyerahkan setiap frame yang sudah jadi ke bridge sebagai dma-buf. Bridge sendiri adalah program statis tanpa driver GPU (ia harus berjalan sebelum Android menyala), jadi pada frame GPU pertama ia menjalankan `anland-gpu-copy`, yang ditautkan ke EGL Android. Helper ini mengimpor frame Android dan buffer layar aplikasi Anland sebagai EGL image, lalu menyalin dengan satu kali draw, sekaligus menskalakan gambar bila `render_scale` di bawah 100. Fence tanda selesai dari GPU dikembalikan ke bridge lalu diteruskan ke Anland, sama seperti backend KDE dan GNOME di rootfs Linux menyerahkan frame-nya: tidak ada pihak yang menunggu GPU di CPU. Bila helper gagal, bridge menyalin dengan CPU seperti pada mode CPU.
+
+Rootfs desktop selangkah lebih jauh: compositor-nya menggambar langsung ke buffer Anland tanpa salinan sama sekali. SurfaceFlinger Android memilih buffer-nya sendiri, sedangkan Anland yang menentukan buffer mana yang digambar berikutnya, jadi di sini tetap ada satu salinan oleh GPU.
 
 Builder menghapus pintasan laporan bug melalui tombol fisik LineageOS agar Android init tidak macet saat memindai FIFO input Waydroid. Perintah Android `dumpstate` tetap tersedia.
 
@@ -168,7 +175,7 @@ Arsip rootfs yang dibangun sebelum ini ditambahkan tidak punya perlindungan ters
 
 Di mesin Linux x86-64, dengan skrip di `waydroid/tests/`:
 
-- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna, penskalaan, input, pergantian ukuran saat Anland tersambung belakangan, kelancaran koneksi sebelum frame pertama dan saat layar Android diam, frame dma-buf ala GPU dengan baris berpadding, serta pengaturan `auto` untuk kedua mode penggambaran.
+- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna, penskalaan, input, pergantian ukuran saat Anland tersambung belakangan, kelancaran koneksi sebelum frame pertama dan saat layar Android diam, frame dma-buf ala GPU dengan baris berpadding, helper penyalin GPU (helper asli di renderer software Mesa, dan tiruan untuk fence dan kegagalan), serta pengaturan `auto` untuk kedua mode penggambaran.
 - `run-init-test.sh`: `ds-waydroid-init` di dalam container Droidspaces sungguhan pada mode biasa, akses hardware, dan privileged, dengan tiruan yang melakukan pemanggilan yang sama seperti init tahap pertama Waydroid.
 - Rootfs ARM64 asli di-boot di Droidspaces lewat emulasi CPU. Init Android menjalankan kedua tahapnya, memuat properti yang dibuat, dan menyalakan jembatan, lalu berhenti di layanan pertama yang butuh binder.
 

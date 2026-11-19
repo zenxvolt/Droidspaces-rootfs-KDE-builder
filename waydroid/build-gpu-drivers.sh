@@ -8,6 +8,8 @@
 #   Mesa freedreno for KGSL   OpenGL ES through EGL  (/vendor/lib*/egl/*_kgsl.so)
 #   Mesa turnip for KGSL      Vulkan, 64-bit only     (/vendor/lib64/hw/vulkan.kgsl.so)
 #   gralloc.gbm.so            graphics buffers from the dma-buf heap
+#   anland-gpu-copy           lets the display bridge copy frames with the GPU,
+#                             64-bit only    (/vendor/bin/anland-gpu-copy)
 #
 # Mesa comes from the same Adreno tree the Linux rootfs images of this
 # repository use (lfdevs/mesa-for-android-container), plus one small patch that
@@ -175,18 +177,29 @@ log "Building gralloc.gbm.so for $ARCH"
   -o "$VENDOR/$LIBDIR/hw/gralloc.gbm.so" "$SCRIPT_DIR/gpu/gralloc_dmaheap.c" -llog
 "$TOOLCHAIN/bin/llvm-strip" --strip-unneeded "$VENDOR/$LIBDIR/hw/gralloc.gbm.so"
 
+# --- GPU copy helper for the display bridge ----------------------------------
+if [[ "$ARCH" == aarch64 ]]; then
+  log "Building anland-gpu-copy"
+  install -d "$VENDOR/bin"
+  "$TOOLCHAIN/bin/$CLANG_TRIPLE-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie \
+    -D_GNU_SOURCE -I"$SCRIPT_DIR/src" \
+    -o "$VENDOR/bin/anland-gpu-copy" "$SCRIPT_DIR/gpu/anland-gpu-copy.c" -lEGL -lGLESv2 -llog
+  "$TOOLCHAIN/bin/llvm-strip" "$VENDOR/bin/anland-gpu-copy"
+fi
+
 # --- report ------------------------------------------------------------------
 cat > "$OUT_DIR/gpu-release-$ARCH.txt" <<EOF
 mesa_repository=$MESA_REPOSITORY
 mesa_revision=$MESA_REVISION
 mesa_patches=$(cd "$SCRIPT_DIR/gpu" && sha256sum mesa-*.patch | awk '{print $1}' | tr '\n' ' ')
 gralloc_source=$(sha256sum "$SCRIPT_DIR/gpu/gralloc_dmaheap.c" | awk '{print $1}')
+gpu_copy_source=$(cat "$SCRIPT_DIR/gpu/anland-gpu-copy.c" "$SCRIPT_DIR/src/gpu-copy-protocol.h" | sha256sum | awk '{print $1}')
 android_api=$ANDROID_API
 arch=$ARCH
 EOF
 
 log "Done"
 find "$VENDOR" -type f -printf '%P  %s bytes\n' | sort
-for lib in $(find "$VENDOR" -name '*.so' | sort); do
+for lib in $(find "$VENDOR" \( -name '*.so' -o -path '*/bin/*' \) -type f | sort); do
   printf '%s needs: %s\n' "${lib#"$VENDOR"/}" "$(patchelf --print-needed "$lib" | tr '\n' ' ')"
 done

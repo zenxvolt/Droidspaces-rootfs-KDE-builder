@@ -147,7 +147,7 @@ log "Building ds-waydroid-init"
 log "Building anland-waydroid-bridge"
 "$CC" "${CFLAGS_COMMON[@]}" -O3 \
   -I"$GEN_DIR" -I"$PREFIX/include" \
-  -I"$ANLAND_SRC/libdisplay_producer" -I"$ANLAND_SRC/common" \
+  -I"$SCRIPT_DIR/src" -I"$ANLAND_SRC/libdisplay_producer" -I"$ANLAND_SRC/common" \
   -o "$OUT_DIR/anland-waydroid-bridge" \
   "$SCRIPT_DIR/src/anland-waydroid-bridge.c" \
   "$GEN_DIR/xdg-shell-protocol.c" \

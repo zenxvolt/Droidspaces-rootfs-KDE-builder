@@ -83,6 +83,7 @@ One file inside the rootfs holds all settings: `/system/etc/droidspaces-waydroid
 | `bridge.render_scale` | Percentage of the screen resolution Android renders at. `auto` (default) is `100` with the GPU and `50` with the CPU. `50` draws a quarter of the pixels and enlarges the picture, which looks blurry. |
 | `bridge.ui_width_dp` | Chooses Android's density so the short screen side is this many dp. `400` looks like a normal phone; larger makes everything smaller. |
 | `bridge.max_fps` | Highest frame rate Android may produce. `auto` (default) is `60` with the GPU and `30` with the CPU. |
+| `bridge.gpu_copy` | Who copies Android's frames into the Anland buffer. `auto` (default) lets the GPU do it when Android draws with the GPU. `0` always uses the CPU. |
 | `bridge.wait_for_display` | Seconds Android's display start waits for the Anland app before using the default size. |
 | other `key=value` lines | Android system properties. |
 
@@ -92,7 +93,7 @@ For a running sparse-image container the rootfs is mounted on the phone under `/
 
 How Android draws decides almost everything:
 
-- **With the GPU** (Snapdragon phone, Hardware Access on), Android renders at the full screen resolution and up to 60 fps. The CPU still copies each finished frame into the Anland app's buffer, which costs some battery at high resolutions. If the phone gets warm, set `bridge.render_scale=75` or `bridge.max_fps=45`.
+- **With the GPU** (Snapdragon phone, Hardware Access on), Android renders at the full screen resolution and up to 60 fps, and the GPU also copies each finished frame into the Anland app's buffer, so the CPU stays almost idle while the screen updates. If the phone gets warm, set `bridge.max_fps=45` or `bridge.render_scale=75` (the GPU then enlarges the picture smoothly).
 - **With the CPU** (every other phone, or `gpu.mode=off`), SwiftShader draws every pixel. That is why the rootfs then renders only a quarter of the pixels (`render_scale` 50) at 30 fps: the picture is blurry and animations stutter, but the phone stays usable. Raise both in the settings file for a sharper, smoother picture at the cost of heat.
 
 Either way:
@@ -101,7 +102,7 @@ Either way:
 - In Android, **Settings → System → Developer options**, setting the three animation scales to `0.5x` or off removes a lot of drawing.
 - Droidspaces can limit the processor share of the container (CPU limit in the container settings) if the phone gets too warm.
 
-`/ds-waydroid-boot.log` says which drawing mode was chosen (lines starting with `gpu:`), and `/ds-waydroid-bridge.log` says `drawn by the GPU` or `drawn by the CPU` when the first frame arrives.
+`/ds-waydroid-boot.log` says which drawing mode was chosen (lines starting with `gpu:`). `/ds-waydroid-bridge.log` says `drawn by the GPU` or `drawn by the CPU` when the first frame arrives, and `copied by the GPU` or `copied by the CPU` when it reaches Anland.
 
 ## 4. When it does not work
 
@@ -124,6 +125,7 @@ Once Android is up, `logcat` works from a shell in the container.
 | `cannot map Anland buffer` | This phone's screen buffers cannot be written by the CPU, which this bridge needs. |
 | `gpu: there is no /dev/kgsl-3d0` | Android draws with the CPU. On a Snapdragon phone, turn on **Hardware Access** in the container settings. |
 | `gpu: no dma-buf heap ... can be opened` | The kernel has neither `/dev/dma_heap/system` nor `/dev/ion`, or Hardware Access does not pass them in. Android draws with the CPU. |
+| `GPU copy turned off (...)` in the bridge log | The GPU could not copy frames into the Anland buffer, for the reason in brackets. The CPU copies them instead, so the picture still works but uses more battery. Please report the message. |
 | Black screen or Android restarting after switching to the GPU | Set `gpu.mode=off` in the settings file to go back to CPU drawing, and send `logcat` lines from `SurfaceFlinger`, `libEGL`, `MESA` and `gralloc.dmaheap`. |
 | `gralloc: couldn't create ashmem` | Android could not allocate a graphics buffer. Current builds default to `sys.use_memfd=true` even when Hardware Access exposes an ashmem device. For an older image, add `sys.use_memfd=true` to `/system/etc/droidspaces-waydroid.conf` and restart the container. |
 
@@ -147,8 +149,13 @@ The Mesa inside the Waydroid image only talks to GPUs through the mainline Linux
 | `/vendor/lib64/egl/libEGL_kgsl.so`, `libGLESv1_CM_kgsl.so`, `libGLESv2_kgsl.so`, `/vendor/lib64/libgallium_kgsl.so` | OpenGL ES: Mesa freedreno on KGSL. A small patch (`waydroid/gpu/mesa-egl-android-kgsl.patch`) lets Mesa's Android EGL platform open `/dev/kgsl-3d0`. |
 | `/vendor/lib64/hw/vulkan.kgsl.so` | Vulkan: Mesa turnip on KGSL (only with `gpu.vulkan=1`). |
 | `/vendor/lib64/hw/gralloc.gbm.so` | Replaces Waydroid's allocator, which needs `/dev/dri`. Graphics buffers come from the kernel's dma-buf heap, which the GPU imports through KGSL and the bridge can map. |
+| `/vendor/bin/anland-gpu-copy` | Copies frames into the Anland buffer with the GPU for the bridge. |
 
-When the GPU is chosen, `/sbin/init` sets `ro.hardware.gralloc=gbm`, `ro.hardware.egl=kgsl` and `mesa.loader.driver.override=kgsl`. Waydroid's composer then hands each finished frame to the bridge as a dma-buf, and the bridge copies it to the Anland buffer. Setting any of these properties in the settings file overrides the automatic choice.
+When the GPU is chosen, `/sbin/init` sets `ro.hardware.gralloc=gbm`, `ro.hardware.egl=kgsl` and `mesa.loader.driver.override=kgsl`. Setting any of these properties in the settings file overrides the automatic choice.
+
+Waydroid's composer then hands each finished frame to the bridge as a dma-buf. The bridge itself is a static program without a GPU driver (it has to run before Android is up), so on the first GPU frame it starts `anland-gpu-copy`, which is linked to Android's EGL. The helper imports Android's frame and the Anland app's screen buffers as EGL images and copies with one draw, scaling the picture when `render_scale` is below 100. It hands the GPU's render-done fence back to the bridge, which passes it to Anland, the same way the KDE and GNOME backends of the Linux rootfs images hand over their frames: nobody waits for the GPU on the CPU. If the helper fails, the bridge copies with the CPU, as in CPU mode.
+
+The desktop rootfs images go one step further: their compositor draws straight into the Anland buffer, with no copy at all. Android's SurfaceFlinger chooses its own buffers, while Anland decides which of its buffers is drawn next, so here one GPU copy remains.
 
 The builder removes LineageOS's physical-button bug report shortcut so Android init does not block while scanning Waydroid's input FIFOs. The Android `dumpstate` command remains available.
 
@@ -168,7 +175,7 @@ Rootfs archives built before this was added do not have these protections. Do no
 
 On an x86-64 Linux machine, with the scripts in `waydroid/tests/`:
 
-- `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks colours, scaling, input, late resolution changes, continuous presentation before the first Android frame and while Android holds a static frame, GPU-style dma-buf frames with padded rows, and the `auto` settings for both drawing modes.
+- `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks colours, scaling, input, late resolution changes, continuous presentation before the first Android frame and while Android holds a static frame, GPU-style dma-buf frames with padded rows, the GPU copy helper (the real one on Mesa's software renderer, and a stand-in for render fences and failures), and the `auto` settings for both drawing modes.
 - `run-init-test.sh`: `ds-waydroid-init` inside a real Droidspaces container in default, hardware-access and privileged mode, with a stand-in that makes the same calls as Waydroid's first-stage init.
 - The real ARM64 rootfs was booted in Droidspaces under CPU emulation. Android's init ran both stages, loaded the generated properties and started the bridge, then stopped at the first service that needs binder.
 

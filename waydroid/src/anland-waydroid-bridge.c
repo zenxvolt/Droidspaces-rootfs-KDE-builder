@@ -15,9 +15,12 @@
  *
  * Frames arrive as shared memory when Android draws with the CPU, or as
  * dma-bufs from the dma-buf heap when Android draws with the Adreno GPU (see
- * waydroid/gpu/). Either way the copy is done by the CPU on purpose: it needs
- * no GL driver, so the binary can be fully static and run inside the Android
- * rootfs before anything else is up.
+ * waydroid/gpu/). The bridge itself copies with the CPU: it needs no GL
+ * driver, so the binary can be fully static and run inside the Android rootfs
+ * before anything else is up. For GPU frames it starts anland-gpu-copy, a
+ * small helper linked to Android's EGL, and lets the GPU do the copy instead
+ * (waydroid/src/gpu-copy-protocol.h); without the helper it falls back to the
+ * CPU.
  *
  * The file itself is MIT licensed like the rest of this repository. The binary
  * links Anland's libdisplay_producer (GPL-3.0), so the resulting executable is
@@ -36,10 +39,12 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -49,6 +54,7 @@
 #include "xdg-shell-server-protocol.h"
 #include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "display_producer.h"
+#include "gpu-copy-protocol.h"
 
 /* ------------------------------------------------------------------------- */
 /* Small helpers                                                             */
@@ -65,6 +71,8 @@ struct bridge_dma_buf_sync { uint64_t flags; };
 #define AHB_FORMAT_RGBA_8888    1
 #define AHB_FORMAT_RGBX_8888    2
 #define AHB_FORMAT_RGBA_1010102 43
+
+#define DEFAULT_GPU_COPY_HELPER "/vendor/bin/anland-gpu-copy"
 
 /* DRM fourcc codes of the 32-bit formats accepted from Android. The wl_shm
  * codes are the same except for ARGB8888 (0) and XRGB8888 (1). */
@@ -135,6 +143,8 @@ struct config {
     int render_scale;        /* percent of the real screen Android renders at, -1 = auto */
     int max_fps;             /* -1 = auto */
     int gpu;                 /* -1 = read ANDROID_PROP_FILE, 0 = CPU drawing, 1 = GPU */
+    int gpu_copy;            /* copy GPU frames with the GPU: -1 = when gpu, 0, 1 */
+    char gpu_copy_helper[PATH_MAX];
     int wait_for_display_ms; /* hold the first configure this long for a real size */
     int ui_width_dp;         /* pick the Android density so the short side is this many dp */
 };
@@ -204,6 +214,13 @@ struct bridge {
     /* Pointer -> touch emulation */
     float pointer_x, pointer_y;
     bool pointer_down;
+
+    /* GPU copy helper (anland-gpu-copy) */
+    pid_t gc_pid;
+    int gc_sock;
+    bool gc_ready, gc_failed;
+    uint32_t gc_targets;     /* bit per Anland buffer the helper has imported */
+    uint32_t gc_next_id;
 
     /* Stats */
     uint64_t frames, last_stats_ms, last_frames;
@@ -393,7 +410,9 @@ static bool copy_frame(struct bridge *b, const struct frame_src *f, struct targe
  * read with the CPU, bracketed by DMA_BUF_IOCTL_SYNC so the CPU caches see
  * what the GPU wrote. */
 struct dmabuf_buffer {
+    struct bridge *bridge;
     struct wl_resource *resource;
+    uint32_t gc_id;          /* id at the GPU copy helper, 0 = not imported */
     int fd;
     uint32_t offset, stride, width, height, format;
     uint64_t modifier;
@@ -403,6 +422,7 @@ struct dmabuf_buffer {
 };
 
 struct dmabuf_params {
+    struct bridge *bridge;
     struct wl_resource *resource;
     int fd;
     uint32_t offset, stride;
@@ -440,9 +460,13 @@ static const struct wl_buffer_interface dmabuf_buffer_impl = {
     .destroy = dmabuf_buffer_destroy_request,
 };
 
+static void gc_forget_source(struct bridge *b, uint32_t id);
+
 static void dmabuf_buffer_resource_destroy(struct wl_resource *r)
 {
     struct dmabuf_buffer *d = wl_resource_get_user_data(r);
+    if (d->gc_id)
+        gc_forget_source(d->bridge, d->gc_id);
     if (d->map)
         munmap(d->map, d->map_len);
     close(d->fd);
@@ -473,9 +497,249 @@ static const uint8_t *dmabuf_buffer_pixels(struct dmabuf_buffer *d)
     return d->map ? (const uint8_t *)d->map + d->offset : NULL;
 }
 
-/* Copies a committed buffer of either kind. */
-static bool copy_buffer(struct bridge *b, struct wl_resource *buffer, struct target *t)
+/* ------------------------------------------------------------------------- */
+/* GPU copy helper                                                           */
+/* ------------------------------------------------------------------------- */
+
+static bool gc_wanted(struct bridge *b)
 {
+    return b->cfg.gpu_copy == 1 && !b->gc_failed;
+}
+
+static void gc_stop(struct bridge *b)
+{
+    if (b->gc_sock >= 0)
+        close(b->gc_sock);
+    b->gc_sock = -1;
+    if (b->gc_pid > 0) {
+        kill(b->gc_pid, SIGKILL);
+        waitpid(b->gc_pid, NULL, 0);
+    }
+    b->gc_pid = 0;
+    b->gc_ready = false;
+    b->gc_targets = 0;
+}
+
+/* Gives up on the helper for good: frames are copied with the CPU from now on. */
+static void gc_disable(struct bridge *b, const char *why)
+{
+    WARN("GPU copy turned off (%s); frames are copied with the CPU", why);
+    gc_stop(b);
+    b->gc_failed = true;
+}
+
+/* One request, one reply. send_fd is passed along (not closed); a descriptor in
+ * the reply is stored in *recv_fd (or closed when recv_fd is NULL). */
+static bool gc_call(struct bridge *b, const struct gc_request *rq, int send_fd,
+                    struct gc_reply *rp, int *recv_fd, int timeout_ms)
+{
+    char cbuf[CMSG_SPACE(sizeof(int))];
+    struct iovec iov = { (void *)rq, sizeof(*rq) };
+    struct msghdr mh = { 0 };
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    if (send_fd >= 0) {
+        memset(cbuf, 0, sizeof(cbuf));
+        mh.msg_control = cbuf;
+        mh.msg_controllen = sizeof(cbuf);
+        struct cmsghdr *c = CMSG_FIRSTHDR(&mh);
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(c), &send_fd, sizeof(int));
+    }
+    ssize_t n;
+    do {
+        n = sendmsg(b->gc_sock, &mh, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
+    if (n != (ssize_t)sizeof(*rq)) {
+        gc_disable(b, "the helper stopped");
+        return false;
+    }
+
+    struct pollfd pfd = { .fd = b->gc_sock, .events = POLLIN };
+    int pr;
+    do {
+        pr = poll(&pfd, 1, timeout_ms);
+    } while (pr < 0 && errno == EINTR);
+    if (pr <= 0) {
+        gc_disable(b, pr == 0 ? "the helper did not answer in time" : "cannot wait for the helper");
+        return false;
+    }
+
+    iov.iov_base = rp;
+    iov.iov_len = sizeof(*rp);
+    memset(&mh, 0, sizeof(mh));
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = cbuf;
+    mh.msg_controllen = sizeof(cbuf);
+    do {
+        n = recvmsg(b->gc_sock, &mh, MSG_CMSG_CLOEXEC);
+    } while (n < 0 && errno == EINTR);
+    int fd = -1;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); n > 0 && c; c = CMSG_NXTHDR(&mh, c))
+        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
+            memcpy(&fd, CMSG_DATA(c), sizeof(int));
+    if (n != (ssize_t)sizeof(*rp) || rp->type != rq->type) {
+        if (fd >= 0)
+            close(fd);
+        gc_disable(b, "the helper stopped");
+        return false;
+    }
+    rp->text[sizeof(rp->text) - 1] = 0;
+    if (recv_fd)
+        *recv_fd = fd;
+    else if (fd >= 0)
+        close(fd);
+    return true;
+}
+
+/* Started on the first GPU frame: by then Android, and with it the GPU
+ * driver the helper links to, is fully up. */
+static bool gc_start(struct bridge *b)
+{
+    const char *helper = b->cfg.gpu_copy_helper;
+    if (access(helper, X_OK) != 0) {
+        char why[PATH_MAX + 32];
+        snprintf(why, sizeof(why), "%s is missing", helper);
+        gc_disable(b, why);
+        return false;
+    }
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) < 0) {
+        gc_disable(b, "cannot create a socket");
+        return false;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        gc_disable(b, "cannot start the helper");
+        return false;
+    }
+    if (pid == 0) {
+        if (sv[1] == 3)
+            fcntl(3, F_SETFD, 0);
+        else if (dup2(sv[1], 3) < 0)
+            _exit(127);
+        signal(SIGPIPE, SIG_DFL);
+        execl(helper, helper, "3", (char *)NULL);
+        _exit(127);
+    }
+    close(sv[1]);
+    b->gc_sock = sv[0];
+    b->gc_pid = pid;
+
+    struct gc_request rq = { .type = GC_HELLO, .aux = GC_VERSION };
+    struct gc_reply rp;
+    /* The first EGL start loads the driver and may compile shaders. */
+    if (!gc_call(b, &rq, -1, &rp, NULL, 15000))
+        return false;
+    if (rp.status != 0) {
+        gc_disable(b, rp.text[0] ? rp.text : "the helper cannot use the GPU");
+        return false;
+    }
+    b->gc_ready = true;
+    INFO("GPU copy: Android's frames are copied to Anland by the GPU: %s", rp.text);
+    return true;
+}
+
+static void gc_forget_source(struct bridge *b, uint32_t id)
+{
+    if (!b->gc_ready)
+        return;
+    struct gc_request rq = { .type = GC_FORGET_SOURCE, .id = id };
+    struct gc_reply rp;
+    gc_call(b, &rq, -1, &rp, NULL, 1000);
+}
+
+/* The Anland buffers are gone (app disconnected); the helper drops its copies. */
+static void gc_reset_targets(struct bridge *b)
+{
+    if (!b->gc_ready || !b->gc_targets) {
+        b->gc_targets = 0;
+        return;
+    }
+    b->gc_targets = 0;
+    struct gc_request rq = { .type = GC_RESET_TARGETS };
+    struct gc_reply rp;
+    gc_call(b, &rq, -1, &rp, NULL, 1000);
+}
+
+static uint32_t ahb_to_fourcc(uint32_t format)
+{
+    switch (format) {
+    case AHB_FORMAT_RGBA_8888:    return DRM_FORMAT_ABGR8888;
+    case AHB_FORMAT_RGBX_8888:    return DRM_FORMAT_XBGR8888;
+    case AHB_FORMAT_RGBA_1010102: return FOURCC('A', 'B', '3', '0');
+    default:                      return 0;
+    }
+}
+
+/* Copies a GPU frame into Anland buffer idx with the GPU. Returns false when
+ * the CPU has to do it; *fence is the render-done fence or -1. */
+static bool gc_copy(struct bridge *b, struct dmabuf_buffer *d, struct target *t, int idx, int *fence)
+{
+    *fence = -1;
+    if (!gc_wanted(b) || idx < 0 || idx >= 32)
+        return false;
+    if (!b->gc_ready && !gc_start(b))
+        return false;
+
+    struct gc_reply rp;
+    if (!(b->gc_targets & (1u << idx))) {
+        struct gc_request rq = {
+            .type = GC_TARGET, .id = (uint32_t)idx,
+            .width = t->info.width, .height = t->info.height,
+            .stride = t->info.stride, .offset = t->info.offset,
+            .fourcc = ahb_to_fourcc(t->info.format), .modifier = t->info.modifier,
+        };
+        if (!gc_call(b, &rq, t->fd, &rp, NULL, 3000))
+            return false;
+        if (rp.status != 0) {
+            gc_disable(b, rp.text);
+            return false;
+        }
+        b->gc_targets |= 1u << idx;
+    }
+    if (!d->gc_id) {
+        uint32_t id = ++b->gc_next_id;
+        if (!id)
+            id = ++b->gc_next_id;
+        struct gc_request rq = {
+            .type = GC_SOURCE, .id = id,
+            .width = d->width, .height = d->height,
+            .stride = d->stride, .offset = d->offset,
+            .fourcc = d->format, .modifier = d->modifier,
+        };
+        if (!gc_call(b, &rq, d->fd, &rp, NULL, 3000))
+            return false;
+        if (rp.status != 0) {
+            gc_disable(b, rp.text);
+            return false;
+        }
+        d->gc_id = id;
+    }
+    struct gc_request rq = { .type = GC_COPY, .id = d->gc_id, .aux = (uint32_t)idx };
+    if (!gc_call(b, &rq, -1, &rp, fence, 2000))
+        return false;
+    if (rp.status != 0) {
+        if (*fence >= 0)
+            close(*fence);
+        *fence = -1;
+        gc_disable(b, rp.text);
+        return false;
+    }
+    return true;
+}
+
+/* Copies a committed buffer of either kind. */
+static bool copy_buffer(struct bridge *b, struct wl_resource *buffer, struct target *t, int idx,
+                        int *fence, bool *by_gpu)
+{
+    *fence = -1;
+    *by_gpu = false;
     struct frame_src f = { 0 };
     struct wl_shm_buffer *shm = wl_shm_buffer_get(buffer);
     if (shm) {
@@ -496,6 +760,10 @@ static bool copy_buffer(struct bridge *b, struct wl_resource *buffer, struct tar
     struct dmabuf_buffer *d = dmabuf_buffer_get(buffer);
     if (!d)
         return false;
+    if (gc_copy(b, d, t, idx, fence)) {
+        *by_gpu = true;
+        return true;
+    }
     f.width = d->width;
     f.height = d->height;
     f.stride = d->stride;
@@ -592,6 +860,7 @@ static struct wl_resource *params_build(struct wl_client *c, struct dmabuf_param
             wl_client_post_no_memory(c);
             return NULL;
         }
+        d->bridge = p->bridge;
         d->resource = res;
         d->fd = p->fd;
         p->fd = -1;
@@ -654,6 +923,7 @@ static void linux_dmabuf_create_params(struct wl_client *c, struct wl_resource *
         wl_client_post_no_memory(c);
         return;
     }
+    p->bridge = wl_resource_get_user_data(r);
     p->resource = res;
     p->fd = -1;
     wl_resource_set_implementation(res, &params_impl, p, params_resource_destroy);
@@ -675,7 +945,7 @@ static void bind_linux_dmabuf(struct wl_client *c, void *data, uint32_t version,
         wl_client_post_no_memory(c);
         return;
     }
-    wl_resource_set_implementation(r, &linux_dmabuf_impl, NULL, NULL);
+    wl_resource_set_implementation(r, &linux_dmabuf_impl, data, NULL);
     for (size_t i = 0; i < sizeof(dmabuf_formats) / sizeof(dmabuf_formats[0]); i++) {
         if (version >= ZWP_LINUX_DMABUF_V1_MODIFIER_SINCE_VERSION) {
             zwp_linux_dmabuf_v1_send_modifier(r, dmabuf_formats[i],
@@ -753,6 +1023,7 @@ static void session_teardown(struct bridge *b)
         b->targets[i].map = NULL;
     }
     b->target_count = 0;
+    gc_reset_targets(b);
     b->target_ready = false;
     b->first_frame_presented = false;
     b->next_present_ms = 0;
@@ -1037,14 +1308,18 @@ static void maybe_present(struct bridge *b)
         return;
     }
     struct target *target = &b->targets[idx];
-    bool copied = false;
+    bool copied = false, by_gpu = false;
+    int fence = -1;
     if (target->frame_serial != b->frame_serial) {
         if (b->top && b->top->buffer)
-            copied = copy_buffer(b, b->top->buffer, target);
+            copied = copy_buffer(b, b->top->buffer, target, idx, &fence, &by_gpu);
         if (!copied)
             clear_target(target);
         target->frame_serial = b->frame_serial;
     }
+    /* Anland waits for the GPU's copy on the GPU, not here. */
+    if (fence >= 0)
+        set_render_fence(b->ctx, fence);
 
     /* The app waits for one render-done message per selection, even when
      * Android hasn't started drawing or the selected buffer is up to date. */
@@ -1054,7 +1329,8 @@ static void maybe_present(struct bridge *b)
     uint32_t refresh = advertised_refresh(b);
     b->next_present_ms = now + (1000000u + refresh - 1) / refresh;
     if (copied && !b->first_frame_presented) {
-        INFO("presented the first Android frame to Anland");
+        INFO("presented the first Android frame to Anland (copied by the %s)",
+             by_gpu ? "GPU" : "CPU");
         b->first_frame_presented = true;
     }
     b->frames++;
@@ -1847,6 +2123,10 @@ static void config_set(struct config *c, const char *key, const char *value)
         c->max_fps = !strcmp(value, "auto") ? -1 : atoi(value);
     else if (!strcmp(key, "gpu"))
         c->gpu = !strcmp(value, "auto") ? -1 : atoi(value) != 0;
+    else if (!strcmp(key, "gpu_copy"))
+        c->gpu_copy = !strcmp(value, "auto") ? -1 : atoi(value) != 0;
+    else if (!strcmp(key, "gpu_copy_helper"))
+        snprintf(c->gpu_copy_helper, sizeof(c->gpu_copy_helper), "%s", value);
     else if (!strcmp(key, "wait_for_display"))
         c->wait_for_display_ms = atoi(value) * 1000;
     else if (!strcmp(key, "ui_width_dp"))
@@ -1897,9 +2177,11 @@ static bool android_uses_gpu(void)
  * at 60 frames per second; with the CPU a quarter of the pixels at 30. */
 static void config_resolve_auto(struct config *c)
 {
-    if (c->render_scale >= 0 && c->max_fps >= 0)
-        return;
-    bool gpu = c->gpu < 0 ? android_uses_gpu() : c->gpu == 1;
+    if (c->gpu < 0)
+        c->gpu = android_uses_gpu();
+    bool gpu = c->gpu == 1;
+    if (c->gpu_copy < 0)
+        c->gpu_copy = gpu;
     if (c->render_scale < 0)
         c->render_scale = gpu ? 100 : 50;
     if (c->max_fps < 0)
@@ -1932,6 +2214,8 @@ static void usage(const char *argv0)
         "                         (auto = 60 with the GPU, else 30)\n"
         "  --gpu auto|0|1         whether Android draws with the GPU, for the auto values\n"
         "                         (auto reads ro.hardware.egl from " ANDROID_PROP_FILE ")\n"
+        "  --gpu_copy auto|0|1    copy GPU frames to Anland with the GPU (auto = when --gpu)\n"
+        "  --gpu_copy_helper PATH the helper that does it (default " DEFAULT_GPU_COPY_HELPER ")\n"
         "  --wait_for_display S   seconds to wait for the Anland app before using the default size\n"
         "  --ui_width_dp N        choose Android's density so the short screen side is N dp (0 = off)\n"
         "  --log FILE             also write messages to FILE\n"
@@ -1952,6 +2236,8 @@ int main(int argc, char **argv)
     c->render_scale = -1;
     c->max_fps = -1;
     c->gpu = -1;
+    c->gpu_copy = -1;
+    snprintf(c->gpu_copy_helper, sizeof(c->gpu_copy_helper), "%s", DEFAULT_GPU_COPY_HELPER);
     c->wait_for_display_ms = 20000;
     c->ui_width_dp = 0;
 
@@ -1990,6 +2276,7 @@ int main(int argc, char **argv)
     b->refresh_mhz = 60000;
     b->client_w = (uint32_t)c->default_width;
     b->client_h = (uint32_t)c->default_height;
+    b->gc_sock = -1;
 
     if (mkdir_p(c->runtime_dir, 0777) < 0)
         WARN("cannot prepare %s: %s", c->runtime_dir, strerror(errno));
@@ -2036,9 +2323,10 @@ int main(int argc, char **argv)
     b->tick = wl_event_loop_add_timer(b->loop, on_tick, b);
     arm_tick(b, 1);
 
-    INFO("ready: Wayland socket %s, Anland socket %s, default %dx%d, scale %d%%, max %d fps",
+    INFO("ready: Wayland socket %s, Anland socket %s, default %dx%d, scale %d%%, max %d fps, "
+         "Android draws with the %s",
          path, c->anland_socket, c->default_width, c->default_height, c->render_scale,
-         c->max_fps);
+         c->max_fps, c->gpu == 1 ? "GPU" : "CPU");
 
     wl_display_run(b->display);
 
@@ -2048,6 +2336,7 @@ int main(int argc, char **argv)
     }
     wl_display_destroy_clients(b->display);
     wl_display_destroy(b->display);
+    gc_stop(b);
     free(b->xmap);
     free(b);
     return 0;

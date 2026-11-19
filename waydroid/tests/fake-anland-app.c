@@ -81,7 +81,7 @@ int main(int argc, char **argv)
     printf("fake-app: connected, offering %d buffers of %ux%u\n", NBUF, w, h);
     fflush(stdout);
 
-    int got = 0;
+    int got = 0, fences = 0;
     for (int attempt = 0; attempt < 2000 && got < frames; attempt++) {
         int idx = got % NBUF;
         if (select_dmabuf(ctx, idx) < 0) {
@@ -89,8 +89,10 @@ int main(int argc, char **argv)
             continue;
         }
         int fence = refresh_done(ctx);
-        if (fence >= 0)
+        if (fence >= 0) {
+            fences++;
             close(fence);
+        }
         if (timed_out) {
             fprintf(stderr, "fake-app: lost the Anland session while waiting for a frame\n");
             break;
@@ -141,7 +143,7 @@ int main(int argc, char **argv)
             push_input_event(ctx, &key);
         }
     }
-    printf("fake-app: received %d frames\n", got);
+    printf("fake-app: received %d frames, %d with a render fence\n", got, fences);
     fflush(stdout);
     usleep(300000);
     disconnect(ctx);

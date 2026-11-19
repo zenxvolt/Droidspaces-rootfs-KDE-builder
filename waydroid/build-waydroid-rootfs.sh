@@ -273,8 +273,12 @@ for gpu_dir in "${GPU_DIRS[@]}"; do
   [[ -d "$gpu_dir/vendor" ]] || die "-G $gpu_dir has no vendor/ directory (run build-gpu-drivers.sh)"
   log "Installing the Adreno GPU drivers from $gpu_dir"
   (cd "$gpu_dir/vendor" && find . -type f) | while read -r file; do
-    install -D -m 0644 -o 0 -g 0 "$gpu_dir/vendor/$file" "$ROOTFS/vendor/${file#./}"
-    echo "  /vendor/${file#./}"
+    file="${file#./}"
+    case "$file" in
+      bin/*) install -D -m 0755 -o 0 -g 2000 "$gpu_dir/vendor/$file" "$ROOTFS/vendor/$file" ;;
+      *)     install -D -m 0644 -o 0 -g 0 "$gpu_dir/vendor/$file" "$ROOTFS/vendor/$file" ;;
+    esac
+    echo "  /vendor/$file"
   done
   for info in "$gpu_dir"/gpu-release-*.txt; do
     if [[ -f "$info" ]]; then sed 's/^/gpu_/' "$info" >> "$GPU_RELEASE"; fi
