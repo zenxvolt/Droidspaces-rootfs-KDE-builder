@@ -59,7 +59,7 @@ sudo ./waydroid/build-waydroid-rootfs.sh
    - leave the init program at its default (`/sbin/init`).
 3. Start the container, then use **Launch Anland**.
 
-The first boot takes several minutes: Android prepares its apps and everything is drawn by the CPU. The Anland app shows nothing until Android's boot animation starts.
+The first boot takes several minutes while Android prepares its apps. Anland shows a black screen until Android submits its first frame. You can open Anland while Android starts.
 
 ## 3. Settings
 
@@ -106,6 +106,8 @@ Once Android is up, `logcat` works from a shell in the container.
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** is off for this container. |
 | `cannot map Anland buffer` | This phone's screen buffers cannot be written by the CPU, which this bridge needs. |
 
+Anland's display path records three milestones in the bridge log. `Anland app connected` confirms that the bridge mapped the app's buffers. `received Android frame` confirms that Waydroid's hardware composer submitted a frame. `presented the first Android frame to Anland` confirms that the bridge copied it and sent the render completion. If the log stops at `Anland app connected`, check the container's `logcat` for messages from the hardware composer and `SurfaceFlinger`.
+
 When reporting a problem, the easiest way is the Droidspaces app's **Generate a bug report**. It writes one archive to the phone's storage with the container log (which holds the `/sbin/init` report), the kernel log, and the kernel's record of the last crash if the phone restarted.
 
 ## How it works
@@ -133,7 +135,7 @@ Rootfs archives built before this was added do not have these protections. Do no
 
 On an x86-64 Linux machine, with the scripts in `waydroid/tests/`:
 
-- `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks picture colours, scaling, touch and key delivery, and switching size when the app connects late.
+- `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks colours, scaling, input, late resolution changes, and continuous presentation before the first Android frame and while Android holds a static frame.
 - `run-init-test.sh`: `ds-waydroid-init` inside a real Droidspaces container in default, hardware-access and privileged mode, with a stand-in that makes the same calls as Waydroid's first-stage init.
 - The real ARM64 rootfs was booted in Droidspaces under CPU emulation. Android's init ran both stages, loaded the generated properties and started the bridge, then stopped at the first service that needs binder.
 

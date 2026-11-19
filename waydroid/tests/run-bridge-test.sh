@@ -122,6 +122,32 @@ check "Android starts at the default size" grep -q "hwc: drawing at 480x800" "$S
 check "Android switches to the app's size" grep -q "hwc: drawing at 600x1000" "$SCENARIO_DIR/hwc.log"
 check "picture is correct after the switch" check_picture "$SCENARIO_DIR/frame-40.ppm" 600 1000
 
+# Keep asking for frames for longer than Anland's five-second timeout, first
+# without a Wayland client, then with just one Android frame on screen.
+d="$T/idle"; mkdir -p "$d/xdg"
+echo "== idle"
+"$T/display_daemon" "$d/display.sock" >"$d/daemon.log" 2>&1 & PIDS+=("$!")
+"$BRIDGE" --anland_socket "$d/display.sock" --runtime_dir "$d/xdg" --log "$d/bridge.log" \
+  --max_fps 30 >"$d/bridge.out" 2>&1 & PIDS+=("$!")
+timeout 25 "$T/fake-app" "$d/display.sock" 160 240 385 "$d/frame" idle >"$d/app.log" 2>&1 &
+app_pid=$!; PIDS+=("$app_pid")
+sleep 6
+XDG_RUNTIME_DIR="$d/xdg" WAYLAND_DISPLAY=wayland-0 "$T/fake-hwc" 1 25 >"$d/hwc.log" 2>&1 &
+hwc_pid=$!; PIDS+=("$hwc_pid")
+app_rc=0
+wait "$app_pid" || app_rc=$?
+check "Anland stayed connected through startup and an idle screen" test "$app_rc" -eq 0
+check "the first Anland buffer is black before Android draws" python3 - "$d/frame-1.ppm" <<'PY'
+import pathlib
+import sys
+
+assert pathlib.Path(sys.argv[1]).read_bytes() == b'P6\n160 240\n255\n' + bytes(160 * 240 * 3)
+PY
+for frame in 383 384 385; do
+  check "the last Android frame survives in buffer $(((frame - 1) % 3))" check_picture "$d/frame-$frame.ppm" 160 240
+done
+SCENARIO_DIR="$d"
+
 if [[ "$FAILED" -ne 0 ]]; then
   echo
   echo "Some checks failed. Logs of the last scenario:"

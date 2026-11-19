@@ -59,7 +59,7 @@ sudo ./waydroid/build-waydroid-rootfs.sh
    - biarkan program init pada bawaannya (`/sbin/init`).
 3. Jalankan container, lalu tekan **Launch Anland**.
 
-Boot pertama memakan beberapa menit: Android menyiapkan aplikasinya dan semuanya digambar oleh CPU. Aplikasi Anland belum menampilkan apa pun sampai animasi boot Android mulai.
+Boot pertama memakan beberapa menit karena Android menyiapkan aplikasinya. Kamu bisa membuka Anland saat Android mulai. Anland menampilkan layar hitam sampai Android mengirim frame pertama.
 
 ## 3. Pengaturan
 
@@ -106,6 +106,8 @@ Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container.
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** mati untuk container ini. |
 | `cannot map Anland buffer` | Buffer layar ponsel ini tidak bisa ditulis oleh CPU, padahal jembatan ini membutuhkannya. |
 
+Log bridge mencatat tiga tahap. `Anland app connected` berarti bridge sudah memetakan buffer aplikasi. `received Android frame` berarti hardware composer Waydroid sudah mengirim frame. `presented the first Android frame to Anland` berarti bridge sudah menyalin frame dan membalas permintaan buffer Anland. Jika log berhenti di `Anland app connected`, periksa pesan hardware composer dan `SurfaceFlinger` di `logcat` dalam container.
+
 Saat melaporkan masalah, cara termudah adalah **Generate a bug report** di aplikasi Droidspaces. Ia menulis satu arsip ke penyimpanan ponsel berisi log container (yang memuat laporan `/sbin/init`), log kernel, dan catatan kernel tentang crash terakhir bila ponsel sempat restart.
 
 ## Cara kerjanya
@@ -133,7 +135,7 @@ Arsip rootfs yang dibangun sebelum ini ditambahkan tidak punya perlindungan ters
 
 Di mesin Linux x86-64, dengan skrip di `waydroid/tests/`:
 
-- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna gambar, penskalaan, sampainya sentuhan dan tombol, serta pergantian ukuran saat aplikasi tersambung belakangan.
+- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna, penskalaan, input, pergantian ukuran saat Anland tersambung belakangan, serta kelancaran koneksi sebelum frame pertama dan saat layar Android diam.
 - `run-init-test.sh`: `ds-waydroid-init` di dalam container Droidspaces sungguhan pada mode biasa, akses hardware, dan privileged, dengan tiruan yang melakukan pemanggilan yang sama seperti init tahap pertama Waydroid.
 - Rootfs ARM64 asli di-boot di Droidspaces lewat emulasi CPU. Init Android menjalankan kedua tahapnya, memuat properti yang dibuat, dan menyalakan jembatan, lalu berhenti di layanan pertama yang butuh binder.
 

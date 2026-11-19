@@ -9,7 +9,7 @@
  * Every frame is a known gradient so the receiving side can check the picture:
  *   red = column * 255 / width, green = row * 255 / height, blue = 200.
  *
- * Usage: fake-waydroid-hwc FRAMES
+ * Usage: fake-waydroid-hwc FRAMES [HOLD_SECONDS]
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -204,6 +204,7 @@ static void paint(struct frame *f)
 int main(int argc, char **argv)
 {
     int frames = argc > 1 ? atoi(argv[1]) : 120;
+    int hold_seconds = argc > 2 ? atoi(argv[2]) : 0;
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     struct wl_display *dpy = wl_display_connect(NULL);
@@ -268,6 +269,8 @@ int main(int argc, char **argv)
         usleep(16000);
         wl_display_roundtrip(dpy);
     }
+    /* Leave the last committed buffer on screen without producing new frames. */
+    sleep(hold_seconds);
     printf("hwc: done\n");
     xdg_toplevel_destroy(top);
     xdg_surface_destroy(xs);

@@ -5,9 +5,10 @@
  * way the app offers its screen buffers, asks the producer for frames, saves
  * them as PPM pictures and injects a few touch and key events.
  *
- * Usage: fake-anland-app SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX
+ * Usage: fake-anland-app SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [idle]
  */
 #define _GNU_SOURCE
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,9 @@
 #include "display_consumer.h"
 
 #define NBUF 3
+
+static void connected(void *data) { *(bool *)data = true; }
+static void fell_back(void *data) { *(bool *)data = true; }
 
 static void save_ppm(const char *path, const uint8_t *px, uint32_t w, uint32_t h, uint32_t stride)
 {
@@ -33,13 +37,14 @@ static void save_ppm(const char *path, const uint8_t *px, uint32_t w, uint32_t h
 int main(int argc, char **argv)
 {
     if (argc < 6) {
-        fprintf(stderr, "usage: %s SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX\n", argv[0]);
+        fprintf(stderr, "usage: %s SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [idle]\n", argv[0]);
         return 2;
     }
     const char *sock = argv[1];
     uint32_t w = (uint32_t)atoi(argv[2]), h = (uint32_t)atoi(argv[3]);
     int frames = atoi(argv[4]);
     const char *prefix = argv[5];
+    bool idle_test = argc > 6 && !strcmp(argv[6], "idle");
 
     /* A stride wider than the picture, like real graphics buffers often have. */
     uint32_t stride = (w + 16) * 4;
@@ -66,6 +71,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "fake-app: cannot connect to %s\n", sock);
         return 1;
     }
+    bool active = false, timed_out = false;
+    if (idle_test) {
+        set_exit_fallback_callback(ctx, connected, &active);
+        set_fallback_callback(ctx, fell_back, &timed_out);
+    }
     set_screen_info(ctx, w, h, 1, 60000);
     push_dmabufs(ctx, fds, infos, NBUF);
     printf("fake-app: connected, offering %d buffers of %ux%u\n", NBUF, w, h);
@@ -74,24 +84,31 @@ int main(int argc, char **argv)
     int got = 0;
     for (int attempt = 0; attempt < 2000 && got < frames; attempt++) {
         int idx = got % NBUF;
-        maps[idx][3] = 0x55; /* sentinel: the bridge always writes an opaque alpha here */
         if (select_dmabuf(ctx, idx) < 0) {
             usleep(20000);
             continue;
         }
         int fence = refresh_done(ctx);
-        if (fence == -1 && maps[idx][3] == 0x55) {
-            /* nothing was drawn: no producer yet, or it has no frame for us */
+        if (fence >= 0)
+            close(fence);
+        if (timed_out) {
+            fprintf(stderr, "fake-app: lost the Anland session while waiting for a frame\n");
+            break;
+        }
+        if (maps[idx][3] != 0xff || (idle_test ? !active : maps[idx][2] != 200)) {
+            /* Wait for the session, and for the Android gradient in the normal tests. */
             usleep(20000);
             continue;
         }
-        if (fence >= 0)
-            close(fence);
         got++;
-        if (got <= 3 || got == frames) {
+        if (got <= 3 || got == frames || (idle_test && got > frames - NBUF)) {
             char path[512];
             snprintf(path, sizeof(path), "%s-%d.ppm", prefix, got);
             save_ppm(path, maps[idx], w, h, stride);
+        }
+        if (idle_test) {
+            usleep(20000);
+            continue;
         }
         if (got == 2) {
             struct InputEvent ev = { .type = INPUT_TYPE_TOUCH };
