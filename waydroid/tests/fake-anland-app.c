@@ -97,7 +97,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "fake-app: lost the Anland session while waiting for a frame\n");
             break;
         }
-        if (maps[idx][3] != 0xff || (idle_test ? !active : maps[idx][2] != 200)) {
+        if (maps[idx][3] != 0xff || (idle_test ? !active : (maps[idx][2] < 192 || maps[idx][2] > 208))) {
             /* Wait for the session, and for the Android gradient in the normal tests. */
             usleep(20000);
             continue;

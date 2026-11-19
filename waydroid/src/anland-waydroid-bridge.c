@@ -82,6 +82,8 @@ struct bridge_dma_buf_sync { uint64_t flags; };
 #define DRM_FORMAT_XRGB8888 FOURCC('X', 'R', '2', '4')
 #define DRM_FORMAT_ABGR8888 FOURCC('A', 'B', '2', '4')
 #define DRM_FORMAT_XBGR8888 FOURCC('X', 'B', '2', '4')
+#define DRM_FORMAT_RGB565   FOURCC('R', 'G', '1', '6')
+#define DRM_FORMAT_BGR888   FOURCC('B', 'G', '2', '4')
 #define DRM_FORMAT_MOD_LINEAR  0ull
 #define DRM_FORMAT_MOD_INVALID 0x00ffffffffffffffull
 
@@ -430,9 +432,59 @@ struct dmabuf_params {
     bool used;
 };
 
+/* Waydroid's composer asks for these for Android's RGBA/RGBX/BGRA_8888,
+ * RGB_565 and RGB_888 buffers. An unsupported format would make it abort. */
 static const uint32_t dmabuf_formats[] = {
     DRM_FORMAT_ABGR8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888,
+    DRM_FORMAT_RGB565, DRM_FORMAT_BGR888,
 };
+
+static uint32_t dmabuf_bytes_per_pixel(uint32_t format)
+{
+    switch (format) {
+    case DRM_FORMAT_RGB565: return 2;
+    case DRM_FORMAT_BGR888: return 3;
+    default:                return 4;
+    }
+}
+
+/* 16 and 24 bit frames are first widened to ABGR8888 in this scratch buffer,
+ * so the copy and scaling code only ever sees 32 bit pixels. They are rare:
+ * Android draws its windows in 32 bit. */
+static uint32_t *g_widen;
+static size_t g_widen_len;
+
+static const uint8_t *widen_to_abgr(const uint8_t *src, uint32_t w, uint32_t h,
+                                    uint32_t stride, uint32_t format)
+{
+    size_t need = (size_t)w * h;
+    if (need > g_widen_len) {
+        uint32_t *p = realloc(g_widen, need * sizeof(uint32_t));
+        if (!p)
+            return NULL;
+        g_widen = p;
+        g_widen_len = need;
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *row = src + (size_t)y * stride;
+        uint32_t *out = g_widen + (size_t)y * w;
+        if (format == DRM_FORMAT_RGB565) {
+            const uint16_t *px = (const uint16_t *)row;
+            for (uint32_t x = 0; x < w; x++) {
+                uint32_t v = px[x];
+                uint32_t r = (v >> 11) & 0x1f, g = (v >> 5) & 0x3f, b = v & 0x1f;
+                r = (r << 3) | (r >> 2);
+                g = (g << 2) | (g >> 4);
+                b = (b << 3) | (b >> 2);
+                out[x] = r | (g << 8) | (b << 16) | 0xff000000u;
+            }
+        } else { /* BGR888: bytes R, G, B */
+            for (uint32_t x = 0; x < w; x++)
+                out[x] = row[3 * x] | (row[3 * x + 1] << 8) | (row[3 * x + 2] << 16) | 0xff000000u;
+        }
+    }
+    return (const uint8_t *)g_widen;
+}
 
 static bool dmabuf_format_supported(uint32_t format)
 {
@@ -772,6 +824,11 @@ static bool copy_buffer(struct bridge *b, struct wl_resource *buffer, struct tar
     if (!f.data)
         return false;
     dmabuf_sync(d->fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+    if (dmabuf_bytes_per_pixel(d->format) != 4) {
+        f.data = widen_to_abgr(f.data, d->width, d->height, d->stride, d->format);
+        f.stride = d->width * 4;
+        f.format = DRM_FORMAT_ABGR8888;
+    }
     bool ok = copy_frame(b, &f, t);
     dmabuf_sync(d->fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
     if (!ok)
@@ -844,7 +901,7 @@ static struct wl_resource *params_build(struct wl_client *c, struct dmabuf_param
     } else if (p->modifier != DRM_FORMAT_MOD_LINEAR && p->modifier != DRM_FORMAT_MOD_INVALID) {
         why = "only linear buffers can be read by the CPU";
         code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT;
-    } else if (p->stride / 4 < (uint32_t)width) {
+    } else if (p->stride / dmabuf_bytes_per_pixel(format) < (uint32_t)width) {
         why = "stride is smaller than a row";
         code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_OUT_OF_BOUNDS;
     }
@@ -2261,6 +2318,11 @@ int main(int argc, char **argv)
     config_clamp(c);
 
     if (c->log_path[0]) {
+        /* Keep the report of the start before (a failed GPU start is often
+         * followed by a start in CPU mode). */
+        char previous[PATH_MAX + 16];
+        snprintf(previous, sizeof(previous), "%s.previous", c->log_path);
+        rename(c->log_path, previous);
         g_log_file = fopen(c->log_path, "w");
         if (g_log_file)
             fchmod(fileno(g_log_file), 0644);

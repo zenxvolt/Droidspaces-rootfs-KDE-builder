@@ -28,6 +28,7 @@
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 
 #define DRM_FORMAT_ABGR8888 0x34324241u /* 'AB24' */
+#define DRM_FORMAT_RGB565   0x36314752u /* 'RG16' */
 
 static struct wl_compositor *compositor;
 static struct wl_shm *shm;
@@ -37,7 +38,7 @@ static struct wl_output *output;
 static int configured, req_w, req_h, out_w, out_h, out_refresh;
 static int have_subcompositor, have_viewporter, have_dmabuf;
 static struct zwp_linux_dmabuf_v1 *dmabuf;
-static int use_dmabuf, dmabuf_abgr_linear;
+static int use_dmabuf, dmabuf_abgr_linear, use_565;
 
 static void dmabuf_format(void *d, struct zwp_linux_dmabuf_v1 *z, uint32_t format)
 {
@@ -204,22 +205,25 @@ struct frame {
     int w, h, pitch; /* pitch in pixels */
     size_t size;
     int abgr;
+    int rgb565;
 };
 
 static int make_frame(struct frame *f, int w, int h, int gpu)
 {
     f->w = w; f->h = h;
     f->abgr = gpu;
+    f->rgb565 = gpu && use_565;
     f->pitch = gpu ? (w + 63) & ~63 : w; /* like the dma-buf gralloc */
-    f->size = (size_t)f->pitch * h * 4;
+    f->size = (size_t)f->pitch * h * (f->rgb565 ? 2 : 4);
     int fd = memfd_create("buffer", MFD_ALLOW_SEALING);
     if (fd < 0 || ftruncate(fd, (off_t)f->size) < 0)
         return -1;
     f->px = mmap(NULL, f->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (gpu) {
         struct zwp_linux_buffer_params_v1 *params = zwp_linux_dmabuf_v1_create_params(dmabuf);
-        zwp_linux_buffer_params_v1_add(params, fd, 0, 0, (uint32_t)f->pitch * 4, 0, 0);
-        f->buffer = zwp_linux_buffer_params_v1_create_immed(params, w, h, DRM_FORMAT_ABGR8888, 0);
+        zwp_linux_buffer_params_v1_add(params, fd, 0, 0, (uint32_t)f->pitch * (f->rgb565 ? 2 : 4), 0, 0);
+        f->buffer = zwp_linux_buffer_params_v1_create_immed(params, w, h,
+                        f->rgb565 ? DRM_FORMAT_RGB565 : DRM_FORMAT_ABGR8888, 0);
         zwp_linux_buffer_params_v1_destroy(params);
     } else {
         struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)f->size);
@@ -235,6 +239,12 @@ static void paint(struct frame *f)
     for (int y = 0; y < f->h; y++)
         for (int x = 0; x < f->w; x++) {
             uint32_t r = (uint32_t)(x * 255 / f->w), g = (uint32_t)(y * 255 / f->h), b = 200;
+            if (f->rgb565) {
+                /* 5/6/5 bits; the receiving side allows for the lost precision */
+                ((uint16_t *)f->px)[y * f->pitch + x] =
+                    (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+                continue;
+            }
             /* alpha deliberately 0: the bridge must still show an opaque screen */
             f->px[y * f->pitch + x] = f->abgr ? (b << 16) | (g << 8) | r : (r << 16) | (g << 8) | b;
         }
@@ -246,6 +256,7 @@ int main(int argc, char **argv)
     int hold_seconds = argc > 2 ? atoi(argv[2]) : 0;
     setvbuf(stdout, NULL, _IOLBF, 0);
     use_dmabuf = getenv("FAKE_HWC_DMABUF") && !strcmp(getenv("FAKE_HWC_DMABUF"), "1");
+    use_565 = getenv("FAKE_HWC_FORMAT") && !strcmp(getenv("FAKE_HWC_FORMAT"), "565");
 
     struct wl_display *dpy = wl_display_connect(NULL);
     if (!dpy) {

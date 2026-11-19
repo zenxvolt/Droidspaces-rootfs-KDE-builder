@@ -51,8 +51,9 @@ check() { # description, command...
 # check_picture FILE WIDTH HEIGHT : the gradient the fake composer draws
 check_picture() {
   python3 - "$1" "$2" "$3" <<'PY'
-import sys
+import os, sys
 path, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+tol = int(os.environ.get("PICTURE_TOLERANCE", "3"))
 data = open(path, 'rb').read()
 header, rest = data.split(b'\n255\n', 1)
 pw, ph = map(int, header.split(b'\n')[1].split())
@@ -64,10 +65,13 @@ for fx, fy in ((0.1, 0.1), (0.5, 0.25), (0.9, 0.8), (0.33, 0.66)):
     x, y = int(w * fx), int(h * fy)
     r, g, b = px(x, y)
     er, eg = x * 255 // w, y * 255 // h
-    assert abs(r - er) <= 3 and abs(g - eg) <= 3 and b == 200, \
+    assert abs(r - er) <= tol and abs(g - eg) <= tol and abs(b - 200) <= max(tol - 3, 0), \
         f"pixel {x},{y} is {(r, g, b)}, expected about {(er, eg, 200)}"
 PY
 }
+
+# 16 bit pixels keep 5 or 6 bits per colour.
+check_picture_16bit() { PICTURE_TOLERANCE=9 check_picture "$@"; }
 
 scenario() { # name, app WxH, bridge args..., then: app_first|hwc_first
   local name="$1" aw="$2" ah="$3" order="$4"; shift 4
@@ -128,6 +132,11 @@ FAKE_HWC_DMABUF=1 scenario gpu-dmabuf 720 1280 app_first --render_scale 100
 check "the composer used dma-buf buffers" grep -q "hwc: GPU mode" "$SCENARIO_DIR/hwc.log"
 check "the bridge saw a GPU frame" grep -q "dmabuf format 0x34324241, drawn by the GPU" "$SCENARIO_DIR/bridge.log"
 check "GPU picture arrives with correct colours" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
+
+# 2c-565. GPU mode with a 16 bit frame (Android's boot animation is RGB_565).
+FAKE_HWC_DMABUF=1 FAKE_HWC_FORMAT=565 scenario gpu-dmabuf-565 720 1280 app_first --render_scale 100
+check "the bridge accepted a 16 bit frame" grep -q "dmabuf format 0x36314752, drawn by the GPU" "$SCENARIO_DIR/bridge.log"
+check "16 bit picture arrives with correct colours" check_picture_16bit "$SCENARIO_DIR/frame-40.ppm" 720 1280
 
 # 2d. GPU mode with the GPU copy helper (a CPU stand-in here) and render fences.
 FAKE_HWC_DMABUF=1 scenario gpu-copy 720 1280 app_first --render_scale 50 --gpu_copy 1 \

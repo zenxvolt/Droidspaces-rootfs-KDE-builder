@@ -114,7 +114,7 @@ Three places hold the answer, in the order things happen:
 | `dmesg` on the phone (as root) | Android's own early messages, lines starting with `init:`. Lines starting with `anland-bridge` are the display bridge. |
 | `/ds-waydroid-bridge.log` in the rootfs | The display bridge: whether the Anland app connected and at what size. |
 
-Once Android is up, its log is also written to `/data/ds-waydroid-logcat.txt` in the rootfs (for a running sparse-image container: `/mnt/Droidspaces/<container name>/data/ds-waydroid-logcat.txt`), so it can be read from the phone without entering the container.
+Once Android is up, its log is also written to `/data/ds-waydroid-logcat.txt` in the rootfs (for a running sparse-image container: `/mnt/Droidspaces/<container name>/data/ds-waydroid-logcat.txt`), so it can be read from the phone without entering the container. The log of the start before is kept as `ds-waydroid-logcat.previous.txt`, and the bridge's as `ds-waydroid-bridge.log.previous`, which matters after an automatic switch to CPU drawing.
 
 | Message | Meaning |
 | --- | --- |

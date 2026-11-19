@@ -1,0 +1,22 @@
+diff --git a/src/util/u_gralloc/u_gralloc_libdrm.c b/src/util/u_gralloc/u_gralloc_libdrm.c
+index 01c3c17..2fb40d4 100644
+--- a/src/util/u_gralloc/u_gralloc_libdrm.c
++++ b/src/util/u_gralloc/u_gralloc_libdrm.c
+@@ -48,8 +48,15 @@ get_buffer_info(struct u_gralloc *gralloc,
+ 
+    assert(handle->version == GRALLOC_HANDLE_VERSION);
+ 
+-   /* Query basic information using fallback gralloc */
+-   u_gralloc_get_buffer_basic_info(gr->fallback_gralloc, hnd, out);
++   /* Query basic information using fallback gralloc. The handle knows the
++    * real pixel format; the window buffer may only say
++    * IMPLEMENTATION_DEFINED, which the fallback cannot turn into a fourcc. */
++   struct u_gralloc_buffer_handle real = *hnd;
++   if (handle->format)
++      real.hal_format = handle->format;
++   int ret = u_gralloc_get_buffer_basic_info(gr->fallback_gralloc, &real, out);
++   if (ret)
++      return ret;
+ 
+    /* Fill the known data using libdrm gralloc handle */
+    out->modifier = handle->modifier;

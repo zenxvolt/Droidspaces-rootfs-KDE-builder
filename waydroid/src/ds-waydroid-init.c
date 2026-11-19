@@ -505,6 +505,9 @@ static bool choose_gpu(const struct settings *st)
 {
     /* Written by /system/etc/ds-gpu-guard.sh; counts crashes of this start. */
     unlink(GPU_CRASHES_PATH);
+    /* Keep Android's log of the start before (ds-logcat.rc starts afresh). */
+    rename("/data/ds-waydroid-logcat.txt", "/data/ds-waydroid-logcat.previous.txt");
+    rename("/data/ds-waydroid-logcat.txt.1", "/data/ds-waydroid-logcat.previous.txt.1");
 
     if (st->gpu_mode == GPU_OFF) {
         INFO("gpu: turned off with gpu.mode=off; Android draws with the CPU");
