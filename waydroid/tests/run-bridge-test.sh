@@ -23,9 +23,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-XDG_XML="$(pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml"
+PROTOCOLS_DIR="$(pkg-config --variable=pkgdatadir wayland-protocols)"
+XDG_XML="$PROTOCOLS_DIR/stable/xdg-shell/xdg-shell.xml"
+DMABUF_XML="$PROTOCOLS_DIR/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml"
 wayland-scanner client-header "$XDG_XML" "$T/xdg-shell-client-protocol.h"
 wayland-scanner private-code "$XDG_XML" "$T/xdg-shell-protocol.c"
+wayland-scanner client-header "$DMABUF_XML" "$T/linux-dmabuf-unstable-v1-client-protocol.h"
+wayland-scanner private-code "$DMABUF_XML" "$T/linux-dmabuf-unstable-v1-protocol.c"
 
 cc -O1 -o "$T/display_daemon" "$ANLAND_SRC/daemon/daemon.c" \
   "$ANLAND_SRC/libdisplay_daemon/display_daemon.c" "$ANLAND_SRC/common/socket_utils.c" -lpthread
@@ -33,6 +37,7 @@ cc -O1 -I"$ANLAND_SRC/libdisplay_consumer" -I"$ANLAND_SRC/common" -o "$T/fake-ap
   "$SCRIPT_DIR/fake-anland-app.c" "$ANLAND_SRC/libdisplay_consumer/display_consumer.c" \
   "$ANLAND_SRC/common/socket_utils.c" -lpthread
 cc -O1 -I"$T" -o "$T/fake-hwc" "$SCRIPT_DIR/fake-waydroid-hwc.c" "$T/xdg-shell-protocol.c" \
+  "$T/linux-dmabuf-unstable-v1-protocol.c" \
   $(pkg-config --cflags --libs wayland-client)
 
 FAILED=0
@@ -94,9 +99,9 @@ scenario() { # name, app WxH, bridge args..., then: app_first|hwc_first
 }
 
 # 1. The app is already open when Android starts.
-scenario app-first 720 1280 app_first
+scenario app-first 720 1280 app_first --render_scale 100
 check "Android was told the app's screen size" grep -q "hwc: drawing at 720x1280" "$SCENARIO_DIR/hwc.log"
-check "only the simple Wayland path is offered" grep -q "subcompositor=0 viewporter=0 dmabuf=0" "$SCENARIO_DIR/hwc.log"
+check "only the single-surface Wayland path is offered" grep -q "subcompositor=0 viewporter=0 dmabuf=1" "$SCENARIO_DIR/hwc.log"
 check "picture arrives with correct colours" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
 check "touch reaches Android at the right place" grep -q "hwc: touch down id=0 x=360 y=320 surface=ok" "$SCENARIO_DIR/hwc.log"
 check "touch release reaches Android" grep -q "hwc: touch up id=0" "$SCENARIO_DIR/hwc.log"
@@ -116,8 +121,22 @@ check "Android was told three quarters of the screen size" grep -q "hwc: drawing
 check "scaled picture fills the screen correctly" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
 check "touch is scaled to Android's coordinates" grep -q "hwc: touch down id=0 x=270 y=240 surface=ok" "$SCENARIO_DIR/hwc.log"
 
+# 2c. GPU mode: frames arrive as linear dma-bufs with padded rows.
+FAKE_HWC_DMABUF=1 scenario gpu-dmabuf 720 1280 app_first --render_scale 100
+check "the composer used dma-buf buffers" grep -q "hwc: GPU mode" "$SCENARIO_DIR/hwc.log"
+check "the bridge saw a GPU frame" grep -q "dmabuf format 0x34324241, drawn by the GPU" "$SCENARIO_DIR/bridge.log"
+check "GPU picture arrives with correct colours" check_picture "$SCENARIO_DIR/frame-40.ppm" 720 1280
+
+# 2d. "auto" settings follow the drawing mode.
+scenario auto-cpu 720 1280 app_first --render_scale auto --max_fps auto --gpu 0
+check "auto uses half the resolution when the CPU draws" grep -q "hwc: drawing at 360x640" "$SCENARIO_DIR/hwc.log"
+check "auto limits to 30 fps when the CPU draws" grep -q "scale 50%, max 30 fps" "$SCENARIO_DIR/bridge.log"
+FAKE_HWC_DMABUF=1 scenario auto-gpu 720 1280 app_first --render_scale auto --max_fps auto --gpu 1
+check "auto uses the full resolution with the GPU" grep -q "hwc: drawing at 720x1280" "$SCENARIO_DIR/hwc.log"
+check "auto allows 60 fps with the GPU" grep -q "scale 100%, max 60 fps" "$SCENARIO_DIR/bridge.log"
+
 # 3. Android starts before the app; the app connects later with another size.
-scenario app-late 600 1000 hwc_first --wait_for_display 1 --default_width 480 --default_height 800
+scenario app-late 600 1000 hwc_first --render_scale 100 --wait_for_display 1 --default_width 480 --default_height 800
 check "Android starts at the default size" grep -q "hwc: drawing at 480x800" "$SCENARIO_DIR/hwc.log"
 check "Android switches to the app's size" grep -q "hwc: drawing at 600x1000" "$SCENARIO_DIR/hwc.log"
 check "picture is correct after the switch" check_picture "$SCENARIO_DIR/frame-40.ppm" 600 1000
@@ -128,7 +147,7 @@ d="$T/idle"; mkdir -p "$d/xdg"
 echo "== idle"
 "$T/display_daemon" "$d/display.sock" >"$d/daemon.log" 2>&1 & PIDS+=("$!")
 "$BRIDGE" --anland_socket "$d/display.sock" --runtime_dir "$d/xdg" --log "$d/bridge.log" \
-  --max_fps 30 >"$d/bridge.out" 2>&1 & PIDS+=("$!")
+  --render_scale 100 --max_fps 30 >"$d/bridge.out" 2>&1 & PIDS+=("$!")
 timeout 25 "$T/fake-app" "$d/display.sock" 160 240 385 "$d/frame" idle >"$d/app.log" 2>&1 &
 app_pid=$!; PIDS+=("$app_pid")
 sleep 6

@@ -6,6 +6,11 @@
  * toplevel, a 1x1 probe buffer while it learns the window size, then full
  * frames in ARGB8888 shared memory without frame callbacks.
  *
+ * With FAKE_HWC_DMABUF=1 it behaves like the composer in GPU mode
+ * (ro.hardware.gralloc=gbm) instead: frames are single-plane linear
+ * ABGR8888 linux-dmabuf buffers whose rows are padded to 64 pixels, created
+ * with create_immed. A memfd stands in for the dma-buf.
+ *
  * Every frame is a known gradient so the receiving side can check the picture:
  *   red = column * 255 / width, green = row * 255 / height, blue = 200.
  *
@@ -20,6 +25,9 @@
 
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
+#include "linux-dmabuf-unstable-v1-client-protocol.h"
+
+#define DRM_FORMAT_ABGR8888 0x34324241u /* 'AB24' */
 
 static struct wl_compositor *compositor;
 static struct wl_shm *shm;
@@ -28,6 +36,21 @@ static struct wl_seat *seat;
 static struct wl_output *output;
 static int configured, req_w, req_h, out_w, out_h, out_refresh;
 static int have_subcompositor, have_viewporter, have_dmabuf;
+static struct zwp_linux_dmabuf_v1 *dmabuf;
+static int use_dmabuf, dmabuf_abgr_linear;
+
+static void dmabuf_format(void *d, struct zwp_linux_dmabuf_v1 *z, uint32_t format)
+{
+    (void)d; (void)z; (void)format;
+}
+static void dmabuf_modifier(void *d, struct zwp_linux_dmabuf_v1 *z, uint32_t format,
+                            uint32_t hi, uint32_t lo)
+{
+    (void)d; (void)z;
+    if (format == DRM_FORMAT_ABGR8888 && hi == 0 && lo == 0)
+        dmabuf_abgr_linear = 1;
+}
+static const struct zwp_linux_dmabuf_v1_listener dmabuf_listener = { dmabuf_format, dmabuf_modifier };
 
 static void toplevel_configure(void *d, struct xdg_toplevel *t, int32_t w, int32_t h,
                                struct wl_array *states)
@@ -164,8 +187,13 @@ static void global_add(void *d, struct wl_registry *reg, uint32_t id, const char
         have_subcompositor = 1;
     else if (!strcmp(iface, "wp_viewporter"))
         have_viewporter = 1;
-    else if (!strcmp(iface, "zwp_linux_dmabuf_v1"))
+    else if (!strcmp(iface, "zwp_linux_dmabuf_v1")) {
         have_dmabuf = 1;
+        if (use_dmabuf && ver >= 3) {
+            dmabuf = wl_registry_bind(reg, id, &zwp_linux_dmabuf_v1_interface, 3);
+            zwp_linux_dmabuf_v1_add_listener(dmabuf, &dmabuf_listener, NULL);
+        }
+    }
 }
 static void global_remove(void *d, struct wl_registry *reg, uint32_t id) { (void)d; (void)reg; (void)id; }
 static const struct wl_registry_listener registry_listener = { global_add, global_remove };
@@ -173,20 +201,31 @@ static const struct wl_registry_listener registry_listener = { global_add, globa
 struct frame {
     struct wl_buffer *buffer;
     uint32_t *px;
-    int w, h;
+    int w, h, pitch; /* pitch in pixels */
     size_t size;
+    int abgr;
 };
 
-static int make_frame(struct frame *f, int w, int h)
+static int make_frame(struct frame *f, int w, int h, int gpu)
 {
-    f->w = w; f->h = h; f->size = (size_t)w * h * 4;
+    f->w = w; f->h = h;
+    f->abgr = gpu;
+    f->pitch = gpu ? (w + 63) & ~63 : w; /* like the dma-buf gralloc */
+    f->size = (size_t)f->pitch * h * 4;
     int fd = memfd_create("buffer", MFD_ALLOW_SEALING);
     if (fd < 0 || ftruncate(fd, (off_t)f->size) < 0)
         return -1;
     f->px = mmap(NULL, f->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)f->size);
-    f->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
-    wl_shm_pool_destroy(pool);
+    if (gpu) {
+        struct zwp_linux_buffer_params_v1 *params = zwp_linux_dmabuf_v1_create_params(dmabuf);
+        zwp_linux_buffer_params_v1_add(params, fd, 0, 0, (uint32_t)f->pitch * 4, 0, 0);
+        f->buffer = zwp_linux_buffer_params_v1_create_immed(params, w, h, DRM_FORMAT_ABGR8888, 0);
+        zwp_linux_buffer_params_v1_destroy(params);
+    } else {
+        struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)f->size);
+        f->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
+        wl_shm_pool_destroy(pool);
+    }
     close(fd);
     return 0;
 }
@@ -197,7 +236,7 @@ static void paint(struct frame *f)
         for (int x = 0; x < f->w; x++) {
             uint32_t r = (uint32_t)(x * 255 / f->w), g = (uint32_t)(y * 255 / f->h), b = 200;
             /* alpha deliberately 0: the bridge must still show an opaque screen */
-            f->px[y * f->w + x] = (r << 16) | (g << 8) | b;
+            f->px[y * f->pitch + x] = f->abgr ? (b << 16) | (g << 8) | r : (r << 16) | (g << 8) | b;
         }
 }
 
@@ -206,6 +245,7 @@ int main(int argc, char **argv)
     int frames = argc > 1 ? atoi(argv[1]) : 120;
     int hold_seconds = argc > 2 ? atoi(argv[2]) : 0;
     setvbuf(stdout, NULL, _IOLBF, 0);
+    use_dmabuf = getenv("FAKE_HWC_DMABUF") && !strcmp(getenv("FAKE_HWC_DMABUF"), "1");
 
     struct wl_display *dpy = wl_display_connect(NULL);
     if (!dpy) {
@@ -220,8 +260,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "hwc: a required global is missing\n");
         return 1;
     }
-    printf("hwc: globals ok; subcompositor=%d viewporter=%d dmabuf=%d (all expected 0)\n",
+    printf("hwc: globals ok; subcompositor=%d viewporter=%d dmabuf=%d\n",
            have_subcompositor, have_viewporter, have_dmabuf);
+    if (use_dmabuf) {
+        if (!dmabuf || !dmabuf_abgr_linear) {
+            fprintf(stderr, "hwc: linear ABGR8888 dmabuf buffers are not offered\n");
+            return 1;
+        }
+        printf("hwc: GPU mode, sending linear ABGR8888 dmabufs\n");
+    }
     printf("hwc: output mode %dx%d @ %d mHz\n", out_w, out_h, out_refresh);
 
     struct wl_surface *surface = wl_compositor_create_surface(compositor);
@@ -239,7 +286,7 @@ int main(int argc, char **argv)
 
     /* 1x1 probe buffer, exactly like the HWC's "calibration" step. */
     struct frame probe;
-    make_frame(&probe, 1, 1);
+    make_frame(&probe, 1, 1, 0);
     wl_surface_attach(surface, probe.buffer, 0, 0);
     wl_surface_commit(surface);
     wl_display_roundtrip(dpy);
@@ -258,7 +305,7 @@ int main(int argc, char **argv)
                 wl_buffer_destroy(f.buffer);
                 munmap(f.px, f.size);
             }
-            make_frame(&f, req_w, req_h);
+            make_frame(&f, req_w, req_h, use_dmabuf);
             printf("hwc: drawing at %dx%d\n", req_w, req_h);
         }
         paint(&f);

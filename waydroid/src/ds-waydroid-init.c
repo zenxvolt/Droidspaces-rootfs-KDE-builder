@@ -11,6 +11,7 @@
  *     private binder instance (the host's binder must never be shared);
  *   - hides the host kernel command line so the phone's own androidboot.*
  *     parameters do not leak into the guest;
+ *   - chooses between the Adreno GPU driver and CPU drawing;
  *   - writes /vendor/waydroid.prop from one plain-text config file;
  *   - then replaces itself with Android's /init, which stays PID 1.
  *
@@ -434,14 +435,139 @@ static bool hide_host_boot_parameters(void)
 /* Properties                                                                */
 /* ------------------------------------------------------------------------- */
 
+enum gpu_mode { GPU_AUTO, GPU_ON, GPU_OFF };
+
 struct settings {
     bool force_second_stage;
     bool keep_host_cmdline;
     bool ignore_errors;
     bool unprotected;
+    enum gpu_mode gpu_mode;
+    bool gpu_vulkan;
 };
 
-static void write_properties(void)
+/* ------------------------------------------------------------------------- */
+/* GPU                                                                       */
+/* ------------------------------------------------------------------------- */
+
+/* The Adreno driver files the builder adds to /vendor (waydroid/gpu/). */
+static const char *const gpu_files_64[] = {
+    "/vendor/lib64/egl/libEGL_kgsl.so", "/vendor/lib64/egl/libGLESv2_kgsl.so",
+    "/vendor/lib64/libgallium_kgsl.so", "/vendor/lib64/hw/gralloc.gbm.so", NULL
+};
+static const char *const gpu_files_32[] = {
+    "/vendor/lib/egl/libEGL_kgsl.so", "/vendor/lib/egl/libGLESv2_kgsl.so",
+    "/vendor/lib/libgallium_kgsl.so", "/vendor/lib/hw/gralloc.gbm.so", NULL
+};
+static const char *const dma_heaps[] = {
+    "/dev/dma_heap/system", "/dev/dma_heap/qcom,system", "/dev/ion", NULL
+};
+
+static bool image_needs_32bit(void);
+
+static bool can_open(const char *path, int flags)
+{
+    int fd = open(path, flags | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    close(fd);
+    return true;
+}
+
+static const char *missing_file(const char *const *files)
+{
+    for (int i = 0; files[i]; i++)
+        if (!exists(files[i]))
+            return files[i];
+    return NULL;
+}
+
+/* Android must be able to use the GPU from every app, not only as root. The
+ * nodes are our own copies when device nodes could be created, so widening
+ * their mode does not touch the phone's /dev. */
+static void open_up_gpu_nodes(void)
+{
+    if (!g_can_mknod)
+        return;
+    chmod("/dev/kgsl-3d0", 0666);
+    for (int i = 0; dma_heaps[i]; i++)
+        if (exists(dma_heaps[i]))
+            chmod(dma_heaps[i], 0444);
+}
+
+/* Decides whether Android draws with the Adreno GPU (Mesa freedreno on KGSL)
+ * or with the CPU (SwiftShader). Runs after /dev was rebuilt, so it sees the
+ * same devices Android will. */
+static bool choose_gpu(const struct settings *st)
+{
+    if (st->gpu_mode == GPU_OFF) {
+        INFO("gpu: turned off with gpu.mode=off; Android draws with the CPU");
+        return false;
+    }
+
+    const char *missing = missing_file(gpu_files_64);
+    if (!missing && image_needs_32bit())
+        missing = missing_file(gpu_files_32);
+    if (missing) {
+        INFO("gpu: %s is missing from this rootfs; Android draws with the CPU", missing);
+        return false;
+    }
+
+    open_up_gpu_nodes();
+    const char *problem = NULL;
+    if (!exists("/dev/kgsl-3d0"))
+        problem = "there is no /dev/kgsl-3d0 (a Snapdragon phone with Hardware Access "
+                  "turned on in the container settings is needed)";
+    else if (!can_open("/dev/kgsl-3d0", O_RDWR))
+        problem = "/dev/kgsl-3d0 cannot be opened";
+    else {
+        bool heap = false;
+        for (int i = 0; dma_heaps[i] && !heap; i++)
+            heap = can_open(dma_heaps[i], O_RDONLY);
+        if (!heap)
+            problem = "no dma-buf heap (/dev/dma_heap/system) or /dev/ion can be opened";
+    }
+
+    if (problem && st->gpu_mode == GPU_ON) {
+        WARN("gpu: %s, but gpu.mode=on uses the GPU driver anyway", problem);
+        return true;
+    }
+    if (problem) {
+        INFO("gpu: %s; Android draws with the CPU", problem);
+        return false;
+    }
+    INFO("gpu: Adreno GPU found; Android draws with the GPU (Mesa freedreno on KGSL)");
+    return true;
+}
+
+static bool config_has_key(const char *key)
+{
+    FILE *in = fopen(CONFIG_PATH, "r");
+    if (!in)
+        return false;
+    char line[1024];
+    size_t len = strlen(key);
+    bool found = false;
+    while (!found && fgets(line, sizeof(line), in)) {
+        char *s = trim(line);
+        found = !strncmp(s, key, len) && s[len] == '=';
+    }
+    fclose(in);
+    return found;
+}
+
+/* Writes "key=value" unless the config file sets the key itself. */
+static int default_property(FILE *out, const char *key, const char *value)
+{
+    if (config_has_key(key)) {
+        INFO("properties: %s is set in the config file, keeping that value", key);
+        return 0;
+    }
+    fprintf(out, "%s=%s\n", key, value);
+    return 1;
+}
+
+static void write_properties(const struct settings *st, bool gpu)
 {
     FILE *in = fopen(CONFIG_PATH, "r");
     FILE *out = fopen(PROP_PATH, "w");
@@ -463,7 +589,7 @@ static void write_properties(void)
                 continue;
             if (!strncmp(s, "bridge.", 7))
                 continue;
-            if (!strncmp(s, "init.", 5))
+            if (!strncmp(s, "init.", 5) || !strncmp(s, "gpu.", 4))
                 continue;
             if (!strncmp(s, "sys.use_memfd=", 14))
                 memfd_set = true;
@@ -479,6 +605,18 @@ static void write_properties(void)
     if (!memfd_set) {
         fprintf(out, "sys.use_memfd=true\n");
         count++;
+    }
+    /* How Android draws. The display bridge reads ro.hardware.egl from this
+     * file to pick its own defaults. */
+    if (gpu) {
+        count += default_property(out, "ro.hardware.gralloc", "gbm");
+        count += default_property(out, "ro.hardware.egl", "kgsl");
+        count += default_property(out, "mesa.loader.driver.override", "kgsl");
+        if (st->gpu_vulkan)
+            count += default_property(out, "ro.hardware.vulkan", "kgsl");
+    } else {
+        count += default_property(out, "ro.hardware.gralloc", "default");
+        count += default_property(out, "ro.hardware.egl", "swiftshader");
     }
     fchmod(fileno(out), 0644);
     fclose(out);
@@ -955,6 +1093,12 @@ int main(int argc, char **argv)
                 settings.ignore_errors = true;
             else if (!strcmp(s, "init.unprotected=1"))
                 settings.unprotected = true;
+            else if (!strcmp(s, "gpu.mode=on"))
+                settings.gpu_mode = GPU_ON;
+            else if (!strcmp(s, "gpu.mode=off"))
+                settings.gpu_mode = GPU_OFF;
+            else if (!strcmp(s, "gpu.vulkan=1"))
+                settings.gpu_vulkan = true;
         }
         fclose(cfg);
     }
@@ -971,7 +1115,8 @@ int main(int argc, char **argv)
     if (!dev_ok && !settings.ignore_errors)
         goto stuck;
 
-    write_properties();
+    bool gpu = choose_gpu(&settings);
+    write_properties(&settings, gpu);
 
     if (g_problems) {
         if (!settings.ignore_errors) {

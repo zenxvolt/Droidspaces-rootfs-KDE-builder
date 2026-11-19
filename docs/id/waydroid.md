@@ -10,20 +10,21 @@ Container Droidspaces
     └── init Android (PID 1)             image LineageOS dari Waydroid
         ├── anland-waydroid-bridge  ───► aplikasi Anland (layar ponsel)
         └── SurfaceFlinger → hardware composer Waydroid ──┘
+              └── menggambar dengan GPU Adreno (Snapdragon) atau dengan CPU
 ```
 
 > [!WARNING]
-> **Status: belum terbukti di ponsel sungguhan.** Semua tahap sampai titik Android membutuhkan driver binder sudah diuji (lihat [Apa yang sudah diuji](#apa-yang-sudah-diuji)). Mesin uji tidak punya driver binder, jadi boot Android sampai selesai belum bisa diamati. Kemungkinan besar percobaan pertama perlu dikirimi log.
+> **Status: eksperimental.** Android sudah dilaporkan bisa boot dan tampil di Anland pada ponsel sungguhan dengan penggambaran CPU. Jalur GPU (khusus Snapdragon) masih baru dan belum terbukti di ponsel; bila gagal, Android bisa dikembalikan ke penggambaran CPU dengan `gpu.mode=off` (lihat [Pengaturan](#3-pengaturan)).
 
 ## Yang berfungsi dan yang belum
 
 | Bagian | Keadaan |
 | --- | --- |
-| Tampilan | Tampil di aplikasi Anland. Digambar oleh CPU (SwiftShader) sehingga lambat; turunkan `bridge.render_scale` bila perlu. |
+| Tampilan | Tampil di aplikasi Anland. Di ponsel Snapdragon dengan Hardware Access, Android menggambar dengan GPU Adreno pada resolusi penuh. Di ponsel lain Android menggambar dengan CPU (SwiftShader) pada setengah resolusi dan 30 fps, sehingga terlihat buram dan patah-patah. |
 | Sentuhan | Multi-sentuh. |
 | Keyboard | Tombol fisik diteruskan. Untuk mengetik, pakai keyboard layar milik Android. |
 | Mouse | Klik kiri atau seret diteruskan sebagai ketukan atau usapan jari. Tidak ada kursor dan roda gulir. |
-| Akselerasi GPU | Belum ada. |
+| Akselerasi GPU | Khusus Snapdragon (Adreno): OpenGL ES lewat Mesa freedreno di atas KGSL, dan Vulkan (Mesa turnip) bila diaktifkan. Belum terbukti di ponsel. GPU Mali, PowerVR, dan lainnya: tidak. |
 | Suara, kamera, sensor, clipboard | Belum ada. |
 | Jaringan | Memakai jaringan container Droidspaces. Belum terbukti. |
 
@@ -33,6 +34,7 @@ Container Droidspaces
 - **Aplikasi Anland** dari [rilis Anland](https://github.com/SuperTurtleDev/anland/releases).
 - Kernel dengan **binderfs** (`CONFIG_ANDROID_BINDERFS=y`). Kernel 5.10 ke atas umumnya punya. Android butuh perangkat binder miliknya sendiri; binder milik ponsel tidak pernah dipakai bersama.
 - Ruang penyimpanan kosong sekitar 8 GB.
+- Untuk penggambaran GPU: ponsel **Snapdragon** (GPU Adreno, `/dev/kgsl-3d0`). Kernel 5.10 ke atas juga menyediakan dma-buf heap yang dibutuhkan driver.
 
 ## 1. Membangun
 
@@ -40,12 +42,20 @@ Container Droidspaces
 2. Pilih image:
    - `arm64_only` berjalan di semua ponsel ARM64. Pilih ini bila ragu.
    - `arm64_32` juga menjalankan aplikasi 32-bit, tetapi hanya bisa menyala di prosesor yang masih mendukung kode 32-bit. Banyak prosesor kelas atas terbaru tidak.
-3. Unduh berkas `.tar.xz` dari **Releases**.
+3. Biarkan **gpu** menyala. Pilihan ini menambahkan driver Adreno (beberapa puluh MB); ponsel tanpa GPU Snapdragon tetap menggambar dengan CPU. Build pertama dengan pilihan ini sekitar 20 menit lebih lama; build berikutnya memakai ulang driver yang sudah jadi.
+4. Unduh berkas `.tar.xz` dari **Releases**.
 
 Untuk membangun sendiri di mesin Linux ARM64:
 
 ```bash
 sudo ./waydroid/build-waydroid-rootfs.sh
+```
+
+Driver GPU dibangun terpisah dengan Android NDK di mesin x86-64, lalu diberikan lewat `-G`:
+
+```bash
+./waydroid/build-gpu-drivers.sh -n /path/ke/android-ndk -a aarch64 -o gpu-aarch64
+sudo ./waydroid/build-waydroid-rootfs.sh -G gpu-aarch64
 ```
 
 ## 2. Memasang di Droidspaces
@@ -55,6 +65,7 @@ sudo ./waydroid/build-waydroid-rootfs.sh
    - nyalakan **Anland Display**;
    - nyalakan **mode privileged** dengan `nocaps` dan `noseccomp`;
    - nyalakan **SELinux permissive**;
+   - di ponsel Snapdragon, nyalakan **Hardware Access** agar Android bisa memakai GPU;
    - biarkan jaringan di **NAT**;
    - biarkan program init pada bawaannya (`/sbin/init`).
 3. Jalankan container, lalu tekan **Launch Anland**.
@@ -67,9 +78,11 @@ Semua pengaturan ada di satu berkas di dalam rootfs: `/system/etc/droidspaces-wa
 
 | Pengaturan | Arti |
 | --- | --- |
-| `bridge.render_scale` | Persentase resolusi layar yang dipakai Android untuk menggambar. Bawaan `50` membuat Android menggambar seperempat jumlah piksel; gambarnya diperbesar hingga memenuhi layar. `100` berarti resolusi penuh. |
+| `gpu.mode` | `auto` (bawaan) memakai GPU Adreno bila `/dev/kgsl-3d0` dan dma-buf heap bisa dibuka, selain itu CPU. `off` selalu menggambar dengan CPU. `on` memakai driver GPU walaupun pemeriksaannya gagal (hanya untuk mencari masalah). |
+| `gpu.vulkan` | `1` juga menyediakan Vulkan (Mesa turnip) untuk aplikasi dan game. Bawaan `0`. |
+| `bridge.render_scale` | Persentase resolusi layar yang dipakai Android untuk menggambar. `auto` (bawaan) berarti `100` dengan GPU dan `50` dengan CPU. `50` menggambar seperempat jumlah piksel lalu memperbesarnya, sehingga terlihat buram. |
 | `bridge.ui_width_dp` | Memilih kepadatan layar Android supaya sisi pendek layar selebar sekian dp. `400` terlihat seperti ponsel biasa; angka lebih besar membuat semuanya lebih kecil. |
-| `bridge.max_fps` | Laju frame tertinggi yang boleh dihasilkan Android. Bawaan `30`. |
+| `bridge.max_fps` | Laju frame tertinggi yang boleh dihasilkan Android. `auto` (bawaan) berarti `60` dengan GPU dan `30` dengan CPU. |
 | `bridge.wait_for_display` | Berapa detik Android menunggu aplikasi Anland sebelum memakai ukuran bawaan. |
 | baris `kunci=nilai` lainnya | Properti sistem Android. |
 
@@ -77,14 +90,18 @@ Untuk container sparse image yang sedang berjalan, rootfs terpasang di ponsel pa
 
 ## Kecepatan dan panas
 
-Android digambar oleh CPU, sehingga ponsel bekerja keras dan menjadi hangat. Ini keterbatasan utama versi sekarang.
+Cara Android menggambar menentukan hampir semuanya:
 
-- Rootfs dikirim dengan `bridge.render_scale=50` dan `bridge.max_fps=30`: Android menggambar seperempat jumlah piksel pada setengah laju frame. Naikkan keduanya di berkas pengaturan bila ingin gambar lebih tajam dan halus, dengan akibat lebih panas.
+- **Dengan GPU** (ponsel Snapdragon, Hardware Access menyala), Android menggambar pada resolusi layar penuh sampai 60 fps. CPU tetap menyalin setiap frame yang sudah jadi ke buffer aplikasi Anland, yang memakan sedikit baterai pada resolusi tinggi. Bila ponsel terasa hangat, setel `bridge.render_scale=75` atau `bridge.max_fps=45`.
+- **Dengan CPU** (ponsel lain, atau `gpu.mode=off`), SwiftShader menggambar setiap piksel. Karena itu rootfs lalu hanya menggambar seperempat jumlah piksel (`render_scale` 50) pada 30 fps: gambarnya buram dan animasinya patah-patah, tetapi ponsel tetap bisa dipakai. Naikkan keduanya di berkas pengaturan bila ingin gambar lebih tajam dan halus, dengan akibat lebih panas.
+
+Pada kedua mode:
+
 - Penyalaan pertama adalah yang terberat: Android mengompilasi aplikasinya sekali. Penyalaan berikutnya lebih ringan.
 - Di Android, **Settings → System → Developer options**, menyetel tiga skala animasi ke `0.5x` atau mati menghilangkan banyak pekerjaan menggambar.
 - Droidspaces bisa membatasi jatah prosesor untuk container (batas CPU di pengaturan container) bila ponsel terlalu panas.
 
-Akselerasi GPU belum tersedia. Driver GPU di dalam image Waydroid tidak bisa berbicara dengan GPU ponsel: driver Adreno-nya hanya mendukung antarmuka kernel Linux mainline, bukan antarmuka `kgsl` yang dipakai kernel ponsel, dan untuk Mali tidak ada driver terbuka sama sekali. Karena itu jalur GPU membutuhkan driver yang dibangun terpisah dan hanya mungkin di ponsel Snapdragon (Adreno).
+`/ds-waydroid-boot.log` mencatat mode mana yang dipilih (baris berawalan `gpu:`), dan `/ds-waydroid-bridge.log` menulis `drawn by the GPU` atau `drawn by the CPU` saat frame pertama datang.
 
 ## 4. Bila tidak berjalan
 
@@ -105,6 +122,9 @@ Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container.
 | `Android was started 5 times within three minutes` | Android terus-menerus restart. Penyebabnya ada di `dmesg`. Penyalaan dihentikan sementara untuk menghemat baterai; jalankan container lagi untuk mencoba ulang. |
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** mati untuk container ini. |
 | `cannot map Anland buffer` | Buffer layar ponsel ini tidak bisa ditulis oleh CPU, padahal jembatan ini membutuhkannya. |
+| `gpu: there is no /dev/kgsl-3d0` | Android menggambar dengan CPU. Di ponsel Snapdragon, nyalakan **Hardware Access** di pengaturan container. |
+| `gpu: no dma-buf heap ... can be opened` | Kernel tidak punya `/dev/dma_heap/system` maupun `/dev/ion`, atau Hardware Access tidak meneruskannya. Android menggambar dengan CPU. |
+| Layar hitam atau Android terus restart setelah beralih ke GPU | Setel `gpu.mode=off` di berkas pengaturan untuk kembali ke penggambaran CPU, lalu kirim baris `logcat` dari `SurfaceFlinger`, `libEGL`, `MESA`, dan `gralloc.dmaheap`. |
 | `gralloc: couldn't create ashmem` | Android gagal membuat buffer grafis. Build terbaru mengaktifkan `sys.use_memfd=true` secara bawaan, termasuk saat mode hardware menyediakan perangkat ashmem. Pada image lama, tambahkan `sys.use_memfd=true` ke `/system/etc/droidspaces-waydroid.conf` lalu mulai ulang container. |
 
 Log bridge mencatat tiga tahap. `Anland app connected` berarti bridge sudah memetakan buffer aplikasi. `received Android frame` berarti hardware composer Waydroid sudah mengirim frame. `presented the first Android frame to Anland` berarti bridge sudah menyalin frame dan membalas permintaan buffer Anland. Jika log berhenti di `Anland app connected`, periksa pesan hardware composer dan `SurfaceFlinger` di `logcat` dalam container.
@@ -115,8 +135,20 @@ Saat melaporkan masalah, cara termudah adalah **Generate a bug report** di aplik
 
 Waydroid biasanya butuh alat Python-nya dan LXC di host Linux. Di sini dua program statis kecil menggantikannya:
 
-- **`ds-waydroid-init`** (`/sbin/init`) membuat `/dev` yang bersih dengan instance binder privat, menyembunyikan command line kernel ponsel dari Android tamu, menulis `/vendor/waydroid.prop` dari berkas pengaturan, lalu menjalankan `/init` milik Android yang tetap menjadi PID 1.
-- **`anland-waydroid-bridge`** adalah compositor Wayland minimal. Hardware composer Waydroid adalah klien Wayland; jembatan ini menerima frame-nya, menyalinnya ke buffer yang dipilih aplikasi Anland, dan mengubah input Anland menjadi input Wayland. Program ini memakai `libdisplay_producer` milik Anland, jadi binernya berlisensi GPL-3.0.
+- **`ds-waydroid-init`** (`/sbin/init`) membuat `/dev` yang bersih dengan instance binder privat, menyembunyikan command line kernel ponsel dari Android tamu, memilih antara penggambaran GPU dan CPU, menulis `/vendor/waydroid.prop` dari berkas pengaturan, lalu menjalankan `/init` milik Android yang tetap menjadi PID 1.
+- **`anland-waydroid-bridge`** adalah compositor Wayland minimal. Hardware composer Waydroid adalah klien Wayland; jembatan ini menerima frame-nya (shared memory dari jalur CPU, linux-dmabuf dari jalur GPU), menyalinnya ke buffer yang dipilih aplikasi Anland, dan mengubah input Anland menjadi input Wayland. Program ini memakai `libdisplay_producer` milik Anland, jadi binernya berlisensi GPL-3.0.
+
+### Jalur GPU
+
+Mesa di dalam image Waydroid hanya bisa berbicara dengan GPU lewat antarmuka Linux mainline (`/dev/dri`). Kernel ponsel menjalankan GPU Adreno lewat antarmuka `kgsl` milik Qualcomm, jadi rootfs menambahkan driver sendiri. Driver ini dibangun dengan Android NDK dari pohon Mesa Adreno yang sama dengan yang dipakai rootfs Linux di repositori ini ([mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container)):
+
+| Berkas | Peran |
+| --- | --- |
+| `/vendor/lib64/egl/libEGL_kgsl.so`, `libGLESv1_CM_kgsl.so`, `libGLESv2_kgsl.so`, `/vendor/lib64/libgallium_kgsl.so` | OpenGL ES: Mesa freedreno di atas KGSL. Patch kecil (`waydroid/gpu/mesa-egl-android-kgsl.patch`) membuat platform EGL Android milik Mesa bisa membuka `/dev/kgsl-3d0`. |
+| `/vendor/lib64/hw/vulkan.kgsl.so` | Vulkan: Mesa turnip di atas KGSL (hanya dengan `gpu.vulkan=1`). |
+| `/vendor/lib64/hw/gralloc.gbm.so` | Menggantikan alokator Waydroid yang membutuhkan `/dev/dri`. Buffer grafis diambil dari dma-buf heap kernel, yang bisa diimpor GPU lewat KGSL dan dipetakan oleh bridge. |
+
+Saat GPU dipilih, `/sbin/init` menyetel `ro.hardware.gralloc=gbm`, `ro.hardware.egl=kgsl`, dan `mesa.loader.driver.override=kgsl`. Hardware composer Waydroid lalu menyerahkan setiap frame yang sudah jadi ke bridge sebagai dma-buf, dan bridge menyalinnya ke buffer Anland. Menyetel salah satu properti tersebut di berkas pengaturan akan mengesampingkan pilihan otomatis.
 
 Builder menghapus pintasan laporan bug melalui tombol fisik LineageOS agar Android init tidak macet saat memindai FIFO input Waydroid. Perintah Android `dumpstate` tetap tersedia.
 
@@ -136,8 +168,8 @@ Arsip rootfs yang dibangun sebelum ini ditambahkan tidak punya perlindungan ters
 
 Di mesin Linux x86-64, dengan skrip di `waydroid/tests/`:
 
-- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna, penskalaan, input, pergantian ukuran saat Anland tersambung belakangan, serta kelancaran koneksi sebelum frame pertama dan saat layar Android diam.
+- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna, penskalaan, input, pergantian ukuran saat Anland tersambung belakangan, kelancaran koneksi sebelum frame pertama dan saat layar Android diam, frame dma-buf ala GPU dengan baris berpadding, serta pengaturan `auto` untuk kedua mode penggambaran.
 - `run-init-test.sh`: `ds-waydroid-init` di dalam container Droidspaces sungguhan pada mode biasa, akses hardware, dan privileged, dengan tiruan yang melakukan pemanggilan yang sama seperti init tahap pertama Waydroid.
 - Rootfs ARM64 asli di-boot di Droidspaces lewat emulasi CPU. Init Android menjalankan kedua tahapnya, memuat properti yang dibuat, dan menyalakan jembatan, lalu berhenti di layanan pertama yang butuh binder.
 
-Belum diuji: binderfs privat di dalam Droidspaces pada ponsel, semua hal di Android setelah binder, kecepatan, dan jaringan.
+Belum diuji: driver GPU di ponsel (driver dibangun di CI, tetapi tidak ada ponsel Snapdragon untuk mengujinya), kecepatan, dan jaringan.

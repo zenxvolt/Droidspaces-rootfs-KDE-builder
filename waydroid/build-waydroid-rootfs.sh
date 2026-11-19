@@ -9,6 +9,7 @@
 #   + /sbin/init                          (ds-waydroid-init, prepares the container)
 #   + /system/bin/anland-waydroid-bridge  (display bridge to Anland)
 #   + /system/etc/droidspaces-waydroid.conf
+#   + Adreno GPU drivers in /vendor          (with -G, from build-gpu-drivers.sh)
 #
 # Must run as root on Linux (it loop-mounts the Android images).
 #
@@ -20,6 +21,8 @@
 #   -S FILE     use this system image (.zip or .img) instead of downloading
 #   -V FILE     use this vendor image (.zip or .img) instead of downloading
 #   -T DIR      directory with the prebuilt tools (default: build them)
+#   -G DIR      add the Adreno GPU drivers from DIR (one or more output
+#               directories of build-gpu-drivers.sh, merged; DIR/vendor/...)
 #   -o DIR      output directory (default: ./out)
 #   -c LEVEL    xz compression level 0-9 (default 6)
 #   -k          keep the unpacked rootfs directory
@@ -32,6 +35,7 @@ VENDOR_TYPE="MAINLINE"
 SYSTEM_FILE=""
 VENDOR_FILE=""
 TOOLS_DIR=""
+GPU_DIRS=()
 OUT_DIR="$SCRIPT_DIR/out"
 XZ_LEVEL=6
 KEEP_ROOTFS=false
@@ -39,17 +43,18 @@ KEEP_ROOTFS=false
 : "${WAYDROID_OTA_URL:=https://ota.waydro.id}"
 : "${WAYDROID_OTA_FALLBACK_URL:=https://raw.githubusercontent.com/waydroid/OTA/master}"
 
-while getopts "t:a:S:V:T:o:c:kh" opt; do
+while getopts "t:a:S:V:T:G:o:c:kh" opt; do
   case "$opt" in
     t) SYSTEM_TYPE="$OPTARG" ;;
     a) OTA_ARCH="$OPTARG" ;;
     S) SYSTEM_FILE="$OPTARG" ;;
     V) VENDOR_FILE="$OPTARG" ;;
     T) TOOLS_DIR="$OPTARG" ;;
+    G) GPU_DIRS+=("$OPTARG") ;;
     o) OUT_DIR="$OPTARG" ;;
     c) XZ_LEVEL="$OPTARG" ;;
     k) KEEP_ROOTFS=true ;;
-    *) sed -n '2,26p' "$0"; exit 1 ;;
+    *) sed -n '2,29p' "$0"; exit 1 ;;
   esac
 done
 
@@ -259,6 +264,31 @@ if [[ -f "$LINEAGE_INIT" ]]; then
   sed -i -E '/^[[:space:]]*keycodes[[:space:]]+114[[:space:]]+115[[:space:]]+116[[:space:]]*$/d' "$LINEAGE_INIT"
 fi
 
+# Adreno GPU drivers. They replace Waydroid's gralloc.gbm.so (which needs a
+# DRM device phones do not have) and add the *_kgsl EGL/GLES libraries.
+# /sbin/init only switches Android to them when the phone has /dev/kgsl-3d0.
+GPU_RELEASE="$WORK/gpu-release.txt"
+: > "$GPU_RELEASE"
+for gpu_dir in "${GPU_DIRS[@]}"; do
+  [[ -d "$gpu_dir/vendor" ]] || die "-G $gpu_dir has no vendor/ directory (run build-gpu-drivers.sh)"
+  log "Installing the Adreno GPU drivers from $gpu_dir"
+  (cd "$gpu_dir/vendor" && find . -type f) | while read -r file; do
+    install -D -m 0644 -o 0 -g 0 "$gpu_dir/vendor/$file" "$ROOTFS/vendor/${file#./}"
+    echo "  /vendor/${file#./}"
+  done
+  for info in "$gpu_dir"/gpu-release-*.txt; do
+    if [[ -f "$info" ]]; then sed 's/^/gpu_/' "$info" >> "$GPU_RELEASE"; fi
+  done
+done
+if [[ ${#GPU_DIRS[@]} -gt 0 ]]; then
+  [[ -f "$ROOTFS/vendor/lib64/egl/libEGL_kgsl.so" ]] \
+    || die "the GPU drivers have no 64-bit EGL library"
+  if [[ -e "$ROOTFS/system/bin/linker" && ! -f "$ROOTFS/vendor/lib/egl/libEGL_kgsl.so" ]]; then
+    echo "warning: this image runs 32-bit apps but no 32-bit GPU driver was given;" \
+         "Android will draw with the CPU" >&2
+  fi
+fi
+
 ANDROID_RELEASE="$(sed -n 's/^ro.build.version.release=//p' "$ROOTFS/system/build.prop" | head -n1)"
 LINEAGE_VERSION="$(sed -n 's/^ro.lineage.build.version=//p' "$ROOTFS/system/build.prop" | head -n1)"
 BUILD_DATE="$(date -u +%Y%m%d)"
@@ -279,7 +309,9 @@ system_image=$SYSTEM_NAME
 vendor_image=$VENDOR_NAME
 anland_revision=$ANLAND_REV
 builder_revision=$BUILDER_REV
+gpu_drivers=$([[ ${#GPU_DIRS[@]} -gt 0 ]] && echo adreno-kgsl || echo none)
 EOF
+cat "$GPU_RELEASE" >> "$ROOTFS/system/etc/droidspaces-waydroid-release"
 chmod 0644 "$ROOTFS/system/etc/os-release" "$ROOTFS/system/etc/droidspaces-waydroid-release"
 
 # The same rule the Droidspaces app applies before it installs an archive.
