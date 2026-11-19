@@ -1,0 +1,64 @@
+diff --git a/src/freedreno/common/freedreno_dev_info.h b/src/freedreno/common/freedreno_dev_info.h
+index 6d1e6eb..ad168b3 100644
+--- a/src/freedreno/common/freedreno_dev_info.h
++++ b/src/freedreno/common/freedreno_dev_info.h
+@@ -351,6 +351,12 @@ struct fd_dev_info {
+        */
+       bool cmdbuf_start_a725_quirk;
+ 
++      /* KGSL on Adreno 725 phones protects VPC_UNKNOWN_CNTL (0x930a): writing
++       * it is a "CP protected mode error" and a GPU hang on the first submit.
++       * The blob does not write it there, so neither do we.
++       */
++      bool no_vpc_unknown_cntl;
++
+       bool load_inline_uniforms_via_preamble_ldgk;
+       bool load_shader_consts_via_preamble;
+ 
+diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+index 1d2daf7..fbe1095 100644
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -1156,7 +1156,8 @@ add_gpus([
+         GPUId(chip_id=0xffff07030002, name="FD725"),
+     ], A6xxGPUInfo(
+         CHIP.A7XX,
+-        [a7xx_base, a7xx_gen1, GPUProps(cmdbuf_start_a725_quirk = True)],
++        [a7xx_base, a7xx_gen1, GPUProps(cmdbuf_start_a725_quirk = True,
++                                        no_vpc_unknown_cntl = True)],
+         num_ccu = 4,
+         tile_align_w = 64,
+         tile_align_h = 32,
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 42a0416..6984826 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -2367,7 +2367,13 @@ tu_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+       ~(TU_CMD_FLAG_WAIT_FOR_IDLE | TU_CMD_FLAG_CACHE_INVALIDATE);
+ 
+    tu6_init_static_regs<CHIP>(cmd->device, cs);
+-   tu_init_hw_rp<CHIP>(cs);
++   if (cmd->device->physical_device->info->props.no_vpc_unknown_cntl) {
++      /* tu_init_hw_rp() without VPC_UNKNOWN_CNTL, see no_vpc_unknown_cntl. */
++      if (CHIP >= A7XX)
++         tu_cs_emit_regs(cs, RB_A2D_UNKNOWN_8C34(CHIP));
++   } else {
++      tu_init_hw_rp<CHIP>(cs);
++   }
+ 
+    emit_rb_ccu_cntl<CHIP>(cs, cmd->device, false);
+    emit_vpc_attr_buf<CHIP>(cs, cmd->device, false);
+diff --git a/src/gallium/drivers/freedreno/a6xx/fd6_emit.cc b/src/gallium/drivers/freedreno/a6xx/fd6_emit.cc
+index 567bab8..b7c75ba 100644
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_emit.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_emit.cc
+@@ -1022,7 +1022,8 @@ fd6_emit_static_context_regs(struct fd_context *ctx, fd_cs &cs)
+    crb.add(PC_DGEN_SU_CONSERVATIVE_RAS_CNTL(CHIP));
+ 
+    if (CHIP >= A7XX) {
+-      crb.add(VPC_UNKNOWN_CNTL(CHIP));
++      if (!screen->info->props.no_vpc_unknown_cntl)
++         crb.add(VPC_UNKNOWN_CNTL(CHIP));
+       crb.add(RB_A2D_UNKNOWN_8C34(CHIP));
+ 
+       /* Blob sets these two per draw. */

@@ -238,9 +238,6 @@ static uint32_t drm_fourcc(int format)
  * any of them can become a render target. */
 #define PITCH_ALIGN_PIXELS 64
 
-/* Spare rows after every image buffer, see dev_alloc(). */
-#define GUARD_ROWS 32
-
 /* Chroma stride of YV12 as Android defines it. */
 static int yv12_c_stride(int y_stride)
 {
@@ -487,14 +484,6 @@ static int dev_alloc(alloc_device_t *dev, int w, int h, int format, int usage,
         stride_bytes = stride_px * bpp;
     }
     size_t size = buffer_size(fmt, w, h, stride_bytes);
-    /* The GPU stores rendered tiles in whole blocks (freedreno assumes at
-     * least 16x4 pixels), so on a height that is not a multiple of the block
-     * it writes a few rows past the picture. Without spare rows those writes
-     * hit unmapped memory: a GPU page fault, after which KGSL invalidates the
-     * process's GPU context ("submit failed: Resource deadlock would occur").
-     * 32 spare rows cover every block height freedreno uses. */
-    if (fmt != HAL_PIXEL_FORMAT_BLOB)
-        size += (size_t)stride_bytes * GUARD_ROWS;
     long page = sysconf(_SC_PAGESIZE);
     size = (size + (size_t)page - 1) & ~((size_t)page - 1);
 
