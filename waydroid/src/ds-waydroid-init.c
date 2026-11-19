@@ -772,16 +772,20 @@ static void exec_android_second_stage(void)
     if (g_log)
         fflush(g_log);
     int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-    int saved_err = dup(STDERR_FILENO);
+    int saved_err = -1;
     if (fd >= 0) {
+        saved_err = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
         dup2(fd, STDOUT_FILENO);
         dup2(fd, STDERR_FILENO);
         close(fd);
     }
     execve(ANDROID_INIT, argv, envp);
-    if (saved_err >= 0)
+    int exec_errno = errno;
+    if (saved_err >= 0) {
         dup2(saved_err, STDERR_FILENO);
-    FAIL("cannot execute %s: %s", ANDROID_INIT, strerror(errno));
+        close(saved_err);
+    }
+    FAIL("cannot execute %s: %s", ANDROID_INIT, strerror(exec_errno));
 }
 
 static void on_stop_signal(int signo)
@@ -881,7 +885,8 @@ int main(int argc, char **argv)
 
     if (!check_only) {
         rename(LOG_PATH, OLD_LOG_PATH); /* keep the report of the boot before this one */
-        g_log = fopen(LOG_PATH, "w");
+        /* Zygote aborts if a non-allowlisted descriptor reaches it from init. */
+        g_log = fopen(LOG_PATH, "we");
     }
     INFO("ds-waydroid-init: preparing Android for Droidspaces");
     describe_environment();

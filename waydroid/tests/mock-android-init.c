@@ -43,7 +43,7 @@ static void cat(const char *label, const char *path)
 
 int main(int argc, char **argv)
 {
-    out = fopen("/mock-android-init.log", argc > 1 ? "a" : "w");
+    out = fopen("/mock-android-init.log", argc > 1 ? "ae" : "we");
     if (!out)
         out = stderr;
     setvbuf(out, NULL, _IOLBF, 0);
@@ -75,6 +75,25 @@ int main(int argc, char **argv)
     }
 
     fprintf(out, "second-stage pid=%d arg=%s\n", (int)getpid(), argv[1]);
+    DIR *fds = opendir("/proc/self/fd");
+    if (fds) {
+        int inherited = 0;
+        struct dirent *entry;
+        while ((entry = readdir(fds))) {
+            int fd = atoi(entry->d_name);
+            if (fd > STDERR_FILENO && fd != dirfd(fds) && fd != fileno(out)) {
+                char path[64], target[256];
+                snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+                ssize_t len = readlink(path, target, sizeof(target) - 1);
+                if (len >= 0)
+                    target[len] = '\0';
+                fprintf(out, "inherited fd %d: %s\n", fd, len >= 0 ? target : "<unknown>");
+                inherited++;
+            }
+        }
+        closedir(fds);
+        fprintf(out, "extra inherited descriptors: %d\n", inherited);
+    }
     fprintf(out, "env PATH=%s\n", getenv("PATH") ? getenv("PATH") : "<unset>");
     fprintf(out, "env FIRST_STAGE_STARTED_AT=%s\n",
             getenv("FIRST_STAGE_STARTED_AT") ? "set" : "<unset>");

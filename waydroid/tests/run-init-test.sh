@@ -74,6 +74,7 @@ common_checks() {
   local BOOT="$R/ds-waydroid-boot.log" MOCK="$R/mock-android-init.log"
   check "our init ran as PID 1 and handed over to Android" has "starting Android" "$BOOT"
   check "Android stays PID 1" has "second-stage pid=1" "$MOCK"
+  check "Android does not inherit the starter's file descriptors" has "^extra inherited descriptors: 0$" "$MOCK"
   check "no first-stage call failed" hasnt "first-stage FAIL" "$MOCK"
   check "the host kernel command line is hidden" has "^cmdline: ds_waydroid=1" "$MOCK"
   check "/dev has the nodes Android needs" bash -c "! grep -E 'node /dev/(null|zero|kmsg|random|urandom|ptmx|pts/ptmx|console|socket) +MISSING' '$MOCK'"
