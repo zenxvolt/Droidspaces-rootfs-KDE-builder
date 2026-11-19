@@ -146,7 +146,7 @@ The Mesa inside the Waydroid image only talks to GPUs through the mainline Linux
 
 | File | Role |
 | --- | --- |
-| `/vendor/lib64/egl/libEGL_kgsl.so`, `libGLESv1_CM_kgsl.so`, `libGLESv2_kgsl.so`, `/vendor/lib64/libgallium_kgsl.so` | OpenGL ES: Mesa freedreno on KGSL. A small patch (`waydroid/gpu/mesa-egl-android-kgsl.patch`) lets Mesa's Android EGL platform open `/dev/kgsl-3d0`. |
+| `/vendor/lib64/egl/libEGL_kgsl.so`, `libGLESv1_CM_kgsl.so`, `libGLESv2_kgsl.so`, `/vendor/lib64/libgallium_kgsl.so` | OpenGL ES: Mesa freedreno on KGSL. Two small patches in `waydroid/gpu/` let Mesa's Android EGL platform open `/dev/kgsl-3d0` and let freedreno accept Android's dma-buf buffers on KGSL. |
 | `/vendor/lib64/hw/vulkan.kgsl.so` | Vulkan: Mesa turnip on KGSL (only with `gpu.vulkan=1`). |
 | `/vendor/lib64/hw/gralloc.gbm.so` | Replaces Waydroid's allocator, which needs `/dev/dri`. Graphics buffers come from the kernel's dma-buf heap, which the GPU imports through KGSL and the bridge can map. |
 | `/vendor/bin/anland-gpu-copy` | Copies frames into the Anland buffer with the GPU for the bridge. |

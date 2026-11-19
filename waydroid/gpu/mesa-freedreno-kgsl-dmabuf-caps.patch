@@ -1,0 +1,19 @@
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 9b229f2..32e25d7 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -368,6 +368,14 @@ fd_init_screen_caps(struct fd_screen *screen)
+ 
+    u_init_pipe_screen_caps(&screen->base, 1);
+ 
++   /* The generic code asks the kernel with drmGetCap(DRM_CAP_PRIME), which
++    * fails on KGSL (/dev/kgsl-3d0 is no DRM device), and the dri frontend
++    * then refuses every dma-buf import. The freedreno KGSL backend imports
++    * and exports dma-bufs itself (IOCTL_KGSL_GPUOBJ_IMPORT, dma-buf heap), so
++    * both always work. Android's EGL needs this for every window buffer. */
++   if (!caps->dmabuf)
++      caps->dmabuf = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT;
++
+    /* this is probably not totally correct.. but it's a start: */
+ 
+    /* Supported features (boolean caps). */

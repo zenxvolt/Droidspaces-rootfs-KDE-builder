@@ -146,7 +146,7 @@ Mesa di dalam image Waydroid hanya bisa berbicara dengan GPU lewat antarmuka Lin
 
 | Berkas | Peran |
 | --- | --- |
-| `/vendor/lib64/egl/libEGL_kgsl.so`, `libGLESv1_CM_kgsl.so`, `libGLESv2_kgsl.so`, `/vendor/lib64/libgallium_kgsl.so` | OpenGL ES: Mesa freedreno di atas KGSL. Patch kecil (`waydroid/gpu/mesa-egl-android-kgsl.patch`) membuat platform EGL Android milik Mesa bisa membuka `/dev/kgsl-3d0`. |
+| `/vendor/lib64/egl/libEGL_kgsl.so`, `libGLESv1_CM_kgsl.so`, `libGLESv2_kgsl.so`, `/vendor/lib64/libgallium_kgsl.so` | OpenGL ES: Mesa freedreno di atas KGSL. Dua patch kecil di `waydroid/gpu/` membuat platform EGL Android milik Mesa bisa membuka `/dev/kgsl-3d0` dan membuat freedreno mau menerima buffer dma-buf Android di KGSL. |
 | `/vendor/lib64/hw/vulkan.kgsl.so` | Vulkan: Mesa turnip di atas KGSL (hanya dengan `gpu.vulkan=1`). |
 | `/vendor/lib64/hw/gralloc.gbm.so` | Menggantikan alokator Waydroid yang membutuhkan `/dev/dri`. Buffer grafis diambil dari dma-buf heap kernel, yang bisa diimpor GPU lewat KGSL dan dipetakan oleh bridge. |
 | `/vendor/bin/anland-gpu-copy` | Menyalin frame ke buffer Anland dengan GPU atas nama bridge. |
