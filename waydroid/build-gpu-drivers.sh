@@ -182,7 +182,7 @@ if [[ "$ARCH" == aarch64 ]]; then
   log "Building anland-gpu-copy"
   install -d "$VENDOR/bin"
   "$TOOLCHAIN/bin/$CLANG_TRIPLE-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie \
-    -D_GNU_SOURCE -I"$SCRIPT_DIR/src" \
+    -I"$SCRIPT_DIR/src" \
     -o "$VENDOR/bin/anland-gpu-copy" "$SCRIPT_DIR/gpu/anland-gpu-copy.c" -lEGL -lGLESv2 -llog
   "$TOOLCHAIN/bin/llvm-strip" "$VENDOR/bin/anland-gpu-copy"
 fi
