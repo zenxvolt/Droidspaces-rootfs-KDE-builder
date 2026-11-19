@@ -251,6 +251,14 @@ install -m 0755 -o 0 -g 2000 "$TOOLS_DIR/anland-waydroid-bridge" "$ROOTFS/system
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/anland-bridge.rc" "$ROOTFS/system/etc/init/anland-bridge.rc"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/droidspaces-waydroid.conf" "$ROOTFS/system/etc/droidspaces-waydroid.conf"
 
+# LineageOS registers a physical button shortcut for bugreport. Android init
+# then opens every entry in /dev/input in blocking mode. Waydroid provides
+# FIFOs here, so init can hang waiting for a writer before it starts Android.
+LINEAGE_INIT="$ROOTFS/system/system_ext/etc/init/init.lineage-system_ext.rc"
+if [[ -f "$LINEAGE_INIT" ]]; then
+  sed -i -E '/^[[:space:]]*keycodes[[:space:]]+114[[:space:]]+115[[:space:]]+116[[:space:]]*$/d' "$LINEAGE_INIT"
+fi
+
 ANDROID_RELEASE="$(sed -n 's/^ro.build.version.release=//p' "$ROOTFS/system/build.prop" | head -n1)"
 LINEAGE_VERSION="$(sed -n 's/^ro.lineage.build.version=//p' "$ROOTFS/system/build.prop" | head -n1)"
 BUILD_DATE="$(date -u +%Y%m%d)"

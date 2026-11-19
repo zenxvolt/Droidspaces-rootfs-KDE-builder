@@ -118,7 +118,7 @@ Waydroid biasanya butuh alat Python-nya dan LXC di host Linux. Di sini dua progr
 - **`ds-waydroid-init`** (`/sbin/init`) membuat `/dev` yang bersih dengan instance binder privat, menyembunyikan command line kernel ponsel dari Android tamu, menulis `/vendor/waydroid.prop` dari berkas pengaturan, lalu menjalankan `/init` milik Android yang tetap menjadi PID 1.
 - **`anland-waydroid-bridge`** adalah compositor Wayland minimal. Hardware composer Waydroid adalah klien Wayland; jembatan ini menerima frame-nya, menyalinnya ke buffer yang dipilih aplikasi Anland, dan mengubah input Anland menjadi input Wayland. Program ini memakai `libdisplay_producer` milik Anland, jadi binernya berlisensi GPL-3.0.
 
-Tidak ada isi image Android yang diubah; berkas-berkas di atas hanya ditambahkan.
+Builder menghapus pintasan laporan bug melalui tombol fisik LineageOS agar Android init tidak macet saat memindai FIFO input Waydroid. Perintah Android `dumpstate` tetap tersedia.
 
 ## Cara ponsel dilindungi dari Android tamu
 

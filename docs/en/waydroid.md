@@ -118,7 +118,7 @@ Waydroid normally needs its Python tools and LXC on a Linux host. Here two small
 - **`ds-waydroid-init`** (`/sbin/init`) builds a clean `/dev` with a private binder instance, hides the phone's kernel command line from the guest, writes `/vendor/waydroid.prop` from the settings file and then executes Android's `/init`, which stays PID 1.
 - **`anland-waydroid-bridge`** is a minimal Wayland compositor. Waydroid's hardware composer is a Wayland client; the bridge accepts its frames, copies them into the buffer the Anland app selected and turns Anland input into Wayland input. It links Anland's `libdisplay_producer`, so the binary is GPL-3.0.
 
-Nothing in the Android image is modified; the files above are added to it.
+The builder removes LineageOS's physical-button bug report shortcut so Android init does not block while scanning Waydroid's input FIFOs. The Android `dumpstate` command remains available.
 
 ## How the phone is protected from the guest
 
