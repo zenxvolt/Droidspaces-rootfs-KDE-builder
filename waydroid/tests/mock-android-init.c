@@ -17,6 +17,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static FILE *out;
@@ -117,6 +118,19 @@ int main(int argc, char **argv)
     fprintf(out, "open /dev/null for writing: %s\n", fd >= 0 ? "ok" : strerror(errno));
     if (fd >= 0)
         close(fd);
+
+    /* Match Waydroid's non-root producer and its real input FIFO path. */
+    pid_t input_probe = fork();
+    if (input_probe == 0) {
+        const char *fifo = "/dev/input/wl_touch_events";
+        if (setgid(1000) < 0 || setuid(1000) < 0 || mkfifo(fifo, 0660) < 0)
+            _exit(1);
+        _exit(unlink(fifo) < 0);
+    }
+    int input_status;
+    int input_ok = input_probe > 0 && waitpid(input_probe, &input_status, 0) == input_probe &&
+                   WIFEXITED(input_status) && WEXITSTATUS(input_status) == 0;
+    fprintf(out, "Android system user can create a touch FIFO: %s\n", input_ok ? "yes" : "no");
 
     fprintf(out, "dev listing:");
     DIR *d = opendir("/dev");

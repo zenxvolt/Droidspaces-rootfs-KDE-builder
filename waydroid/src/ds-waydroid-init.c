@@ -353,6 +353,13 @@ static bool build_dev(bool want_emulation, bool *emulation_out)
     carry_prefixed(stage);
 
     char path[PATH_MAX];
+    /* Waydroid's hardware composer runs without root and creates its Wayland
+     * event FIFOs here. InputFlinger also needs the directory before it can
+     * watch for them. The tmpfs must start with only guest input devices. */
+    snprintf(path, sizeof(path), "%s/input", stage);
+    if (mkdir(path, 0755) < 0 || chown(path, 1000, 1000) < 0 || chmod(path, 0775) < 0)
+        WARN("/dev/input: cannot prepare the Waydroid input directory: %s", strerror(errno));
+
     snprintf(path, sizeof(path), "%s/console", stage);
     if (exists("/dev/console") && touch(path) == 0 &&
         mount("/dev/console", path, NULL, MS_BIND, NULL) < 0)

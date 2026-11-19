@@ -79,6 +79,7 @@ common_checks() {
   check "the host kernel command line is hidden" has "^cmdline: ds_waydroid=1" "$MOCK"
   check "/dev has the nodes Android needs" bash -c "! grep -E 'node /dev/(null|zero|kmsg|random|urandom|ptmx|pts/ptmx|console|socket) +MISSING' '$MOCK'"
   check "/dev is writable for Android" has "open /dev/null for writing: ok" "$MOCK"
+  check "the Waydroid composer can create its touch FIFO" has "^Android system user can create a touch FIFO: yes$" "$MOCK"
   check "the Wayland socket directory exists" has "node /run/xdg  *directory" "$MOCK"
   check "properties were generated from the config" has "^prop ro.hardware.gralloc=default" "$MOCK"
   check "bridge settings are not leaked into properties" hasnt "^prop bridge\." "$MOCK"
