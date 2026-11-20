@@ -61,6 +61,31 @@ Batas berikutnya untuk diperiksa adalah jalur SYN dan SYN-ACK antara namespace
 Waydroid, penerusan NAT Droidspaces, dan uplink Android host. Pengujian perlu
 membandingkan trafik aplikasi dan shell ke tujuan yang sama.
 
+Dugaan berikutnya: Android host di ponsel memasang program BPF netd pada root
+cgroup v2. Program itu juga berlaku untuk soket di container dan memfilter
+berdasarkan UID. Lalu lintas root, shell, dan DNS (UID sistem) lolos, tetapi UID
+aplikasi seperti 10xxx dinilai dengan aturan firewall milik ponsel sendiri
+(standby, doze, mode jaringan terbatas). Di VM Linux tidak ada program seperti
+itu. Dugaan ini belum terbukti. `ds-waydroid-diag` sekarang menjalankan
+`ds-net-probe`, yang membuka TCP sebagai root dan sebagai UID aplikasi, dengan
+dan tanpa mark netd:
+
+- gagal hanya bila memakai UID aplikasi, tanpa peduli mark: filter UID (BPF host);
+- gagal hanya bila memakai mark: routing kebijakan di dalam Android;
+- semua berhasil: masalahnya ada di aplikasi atau di DNS-nya.
+
+Di sisi ponsel, `su -c 'dumpsys connectivity trafficcontroller'` menampilkan
+chain firewall yang aktif dan isi `uid_owner_map`; periksa UID aplikasi
+Waydroid yang gagal (misalnya UID Jelly).
+
+`/sbin/init` sekarang membiarkan `/proc/sys/net` tetap bisa ditulis seperti
+`proc:mixed` milik LXC. Itu memperbaiki penyimpangan dari Waydroid, tetapi tidak
+menjelaskan timeout di atas, karena jaringan Android sudah menyala sebelumnya.
+
+Suara: bridge sekarang menjadi server PulseAudio di `/run/xdg/pulse/native`
+untuk HAL audio Waydroid dan mengirim suara lewat kanal audio AnLand. Lulus uji
+`run-bridge-test.sh` (skenario `sound`); belum diuji di ponsel.
+
 Validasi perangkat masih diperlukan untuk helper salin GPU, Vulkan Turnip,
 `arm64_32`, dan ponsel selain Adreno 725.
 

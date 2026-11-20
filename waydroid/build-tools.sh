@@ -144,6 +144,9 @@ CFLAGS_COMMON=(-O2 -Wall -Wextra -Wno-format-truncation -static)
 log "Building ds-waydroid-init"
 "$CC" "${CFLAGS_COMMON[@]}" -o "$OUT_DIR/ds-waydroid-init" "$SCRIPT_DIR/src/ds-waydroid-init.c"
 
+log "Building ds-net-probe"
+"$CC" "${CFLAGS_COMMON[@]}" -o "$OUT_DIR/ds-net-probe" "$SCRIPT_DIR/src/ds-net-probe.c"
+
 log "Building anland-waydroid-bridge"
 "$CC" "${CFLAGS_COMMON[@]}" -O3 \
   -I"$GEN_DIR" -I"$PREFIX/include" \
@@ -158,7 +161,7 @@ log "Building anland-waydroid-bridge"
   "$ANLAND_SRC/common/socket_utils.c" \
   -L"$PREFIX/lib" ${FFI_LIB_DIR:+-L"$FFI_LIB_DIR"} -lwayland-server -lffi -lm -lrt -lpthread
 
-"$STRIP" "$OUT_DIR/ds-waydroid-init" "$OUT_DIR/anland-waydroid-bridge"
+"$STRIP" "$OUT_DIR/ds-waydroid-init" "$OUT_DIR/anland-waydroid-bridge" "$OUT_DIR/ds-net-probe"
 printf '%s\n' "$ANLAND_REVISION" > "$OUT_DIR/anland-revision.txt"
 
 log "Done"

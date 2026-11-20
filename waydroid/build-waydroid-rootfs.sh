@@ -177,7 +177,7 @@ if [[ -z "$TOOLS_DIR" ]]; then
   "$SCRIPT_DIR/build-tools.sh" -o "$WORK/tools" -w "$WORK/tools-work"
   TOOLS_DIR="$WORK/tools"
 fi
-for tool in ds-waydroid-init anland-waydroid-bridge; do
+for tool in ds-waydroid-init anland-waydroid-bridge ds-net-probe; do
   [[ -x "$TOOLS_DIR/$tool" ]] || die "missing helper program: $TOOLS_DIR/$tool"
   file -b "$TOOLS_DIR/$tool" 2>/dev/null | grep -q "aarch64" \
     || echo "warning: $tool is not an ARM64 program; this rootfs will only run on its own architecture" >&2
@@ -256,6 +256,7 @@ install -m 0755 -o 0 -g 0 "$TOOLS_DIR/ds-waydroid-init" "$ROOTFS/sbin/init"
 install -m 0755 -o 0 -g 2000 "$TOOLS_DIR/anland-waydroid-bridge" "$ROOTFS/system/bin/anland-waydroid-bridge"
 install -m 0755 -o 0 -g 2000 "$SCRIPT_DIR/rootfs/ds-waydroid-benchmark" "$ROOTFS/system/bin/ds-waydroid-benchmark"
 install -m 0755 -o 0 -g 2000 "$SCRIPT_DIR/rootfs/ds-waydroid-diag" "$ROOTFS/system/bin/ds-waydroid-diag"
+install -m 0755 -o 0 -g 2000 "$TOOLS_DIR/ds-net-probe" "$ROOTFS/system/bin/ds-net-probe"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/anland-bridge.rc" "$ROOTFS/system/etc/init/anland-bridge.rc"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/ds-logcat.rc" "$ROOTFS/system/etc/init/ds-logcat.rc"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/ds-gpu-guard.rc" "$ROOTFS/system/etc/init/ds-gpu-guard.rc"
