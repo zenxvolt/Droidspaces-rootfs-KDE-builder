@@ -259,7 +259,10 @@ PY
   sleep 0.3
   check "the PulseAudio directory is open to other users despite umask 077" \
     test "$(stat -c %a "$d/xdg/pulse")" = 755
-  if command -v setpriv >/dev/null; then
+  # Switching users needs root; CI runs this test as an ordinary user.
+  if [[ "$(id -u)" -ne 0 ]] || ! command -v setpriv >/dev/null; then
+    echo "  skip  connecting as another user (needs root and setpriv)"
+  else
     check "a non-root user can connect to the PulseAudio socket" \
       setpriv --reuid=65534 --regid=65534 --clear-groups python3 -c \
         "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])" "$d/xdg/pulse/native"
