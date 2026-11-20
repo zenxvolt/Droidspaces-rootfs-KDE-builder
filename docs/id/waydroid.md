@@ -26,8 +26,9 @@ Container Droidspaces
 | Mouse | Klik kiri atau seret diteruskan sebagai ketukan atau usapan jari. Tidak ada kursor dan roda gulir. |
 | Akselerasi GPU | Khusus Snapdragon (Adreno): OpenGL ES lewat Mesa freedreno di atas KGSL, dan Vulkan (Mesa turnip) bila diaktifkan. OpenGL ES terverifikasi di Adreno 725. Vulkan masih perlu pengujian pada ponsel. |
 | Clipboard | Teks bisa disalin dan ditempel antara Anland dan Android di Waydroid. |
-| Suara, kamera, sensor | Belum ada. |
-| Jaringan | HTTPS di Jelly berhasil lewat NAT Droidspaces di VM Linux. Timeout TCP di Jelly pada ponsel uji masih terbuka. |
+| Suara | Keluar dari aplikasi Anland, lewat kanal audio milik Anland sendiri seperti desktop Linux di Anland. Tidak perlu Termux atau pengaturan PulseAudio. |
+| Kamera, sensor, mikrofon | Belum ada. |
+| Jaringan | Jaringan NAT Droidspaces; Android mendapat alamat lewat DHCP seperti di host Waydroid biasa. HTTPS di Jelly berhasil lewat NAT Droidspaces di VM Linux. |
 
 ## Syarat
 
@@ -67,7 +68,8 @@ sudo ./waydroid/build-waydroid-rootfs.sh -G gpu-aarch64
    - nyalakan **mode privileged** dengan `nocaps` dan `noseccomp`;
    - nyalakan **SELinux permissive**;
    - di ponsel Snapdragon, nyalakan **Hardware Access** agar Android bisa memakai GPU;
-   - biarkan jaringan di **NAT**;
+   - biarkan jaringan di **NAT** (di mode host Android akan mengubah routing ponsel, jadi di sana Android tidak diberi jaringan);
+   - biarkan **Configure PulseAudio** mati, sesuai saran Anland: suara lewat aplikasi Anland;
    - biarkan program init pada bawaannya (`/sbin/init`).
 3. Jalankan container, lalu tekan **Launch Anland**.
 
@@ -128,6 +130,8 @@ Jawabannya ada di tiga tempat, sesuai urutan kejadian:
 
 Setelah Android menyala, log-nya juga ditulis ke `/data/ds-waydroid-logcat.txt` di dalam rootfs (untuk container sparse image yang sedang berjalan: `/mnt/Droidspaces/<nama container>/data/ds-waydroid-logcat.txt`), jadi bisa dibaca dari ponsel tanpa masuk ke container. Log dari start sebelumnya disimpan sebagai `ds-waydroid-logcat.previous.txt`, dan log bridge sebagai `ds-waydroid-bridge.log.previous`; ini penting setelah peralihan otomatis ke penggambaran CPU.
 
+Untuk masalah jaringan atau suara, jalankan `ds-waydroid-diag` di shell di dalam container: ia menulis `/ds-waydroid-diag.txt` di dalam rootfs berisi alamat, rute, keputusan layanan jaringan Android, susunan suara, dan baris `logcat` yang relevan. Kirimkan bersama `/ds-waydroid-boot.log`.
+
 | Pesan | Arti |
 | --- | --- |
 | `binder: cannot mount binderfs` | Kernel tidak punya binderfs, atau container tidak diizinkan memasangnya. Periksa mode privileged dan SELinux permissive. Tanpa binderfs di kernel, ini tidak bisa berjalan. |
@@ -142,6 +146,9 @@ Setelah Android menyala, log-nya juga ditulis ke `/data/ds-waydroid-logcat.txt` 
 | `gpu: the GPU driver failed before` di log boot | SurfaceFlinger crash tiga kali dengan driver GPU, jadi Android dimulai ulang dengan penggambaran CPU (GPU fault juga membuat layar ponsel sendiri tersendat). Hapus `/data/ds-gpu-failed` di dalam rootfs, atau setel `gpu.mode=on`, untuk mencoba GPU lagi. Log dari start yang gagal disimpan sebagai `/data/ds-gpu-failed.logcat.txt` dan `/data/ds-gpu-failed.bridge.log`; sertakan keduanya saat melapor. |
 | Layar hitam atau Android terus restart setelah beralih ke GPU | Setel `gpu.mode=off` di berkas pengaturan untuk kembali ke penggambaran CPU, lalu kirim baris `logcat` dari `SurfaceFlinger`, `libEGL`, `MESA`, dan `gralloc.dmaheap`. |
 | `gralloc: couldn't create ashmem` | Android gagal membuat buffer grafis. Build terbaru mengaktifkan `sys.use_memfd=true` secara bawaan, termasuk saat mode hardware menyediakan perangkat ashmem. Pada image lama, tambahkan `sys.use_memfd=true` ke `/system/etc/droidspaces-waydroid.conf` lalu mulai ulang container. |
+| `network: there is no eth0` | Container tidak punya jaringan sendiri. Setel mode jaringan ke **NAT**. |
+| `network: the container shares the phone's network` | Mode jaringan adalah host. Setel ke **NAT**. |
+| `/proc/sys/net is read-only` | Android tidak bisa menyalakan jaringannya. Sertakan laporan ini saat meminta bantuan. |
 
 Log bridge mencatat tiga tahap. `Anland app connected` berarti bridge sudah memetakan buffer aplikasi. `received Android frame` berarti hardware composer Waydroid sudah mengirim frame. `presented the first Android frame to Anland` berarti bridge sudah menyalin frame dan membalas permintaan buffer Anland. Jika log berhenti di `Anland app connected`, periksa pesan hardware composer dan `SurfaceFlinger` di `logcat` dalam container.
 
@@ -179,7 +186,7 @@ Skrip boot Android menganggap dirinya pemilik mesin. Ia menyetel penjadwal dan p
 
 Karena itu `/sbin/init` membangun ulang perlindungan LXC sebelum menjalankan Android:
 
-- `/proc/sys`, `/proc/sysrq-trigger`, dan `/sys` hanya-baca bagi Android;
+- `/proc/sys`, `/proc/sysrq-trigger`, dan `/sys` hanya-baca bagi Android. Pengecualiannya `/proc/sys/net`, sama seperti LXC: isinya hanya pengaturan jaringan milik container sendiri, dan Android harus menulisnya untuk menyalakan jaringan (build sebelum perbaikan ini tidak punya internet di aplikasi);
 - Android mendapat subtree cgroup sendiri, sehingga tidak bisa melihat atau menulis ulang grup `top-app`, `background`, dan lainnya milik ponsel;
 - kapabilitas dikurangi menjadi kumpulan yang dipertahankan konfigurasi LXC Waydroid (tanpa modul kernel, tanpa akses hardware mentah).
 

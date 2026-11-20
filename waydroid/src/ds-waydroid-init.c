@@ -920,12 +920,119 @@ static void drop_capabilities(void)
     INFO("protect: capabilities reduced to the set Waydroid uses");
 }
 
+/* Interfaces that only exist in the phone's own network namespace. Seeing one
+ * means the container shares the phone's network ("host" mode). */
+static bool sees_phone_network(char *name, size_t size)
+{
+    static const char *const phone_prefixes[] = {
+        "wlan", "rmnet", "ccmni", "seth", "rndis", "p2p", "swlan", "ap0", NULL
+    };
+    DIR *d = opendir("/sys/class/net");
+    struct dirent *e;
+    bool found = false;
+    while (d && !found && (e = readdir(d)))
+        for (int i = 0; phone_prefixes[i]; i++)
+            if (!strncmp(e->d_name, phone_prefixes[i], strlen(phone_prefixes[i]))) {
+                snprintf(name, size, "%s", e->d_name);
+                found = true;
+                break;
+            }
+    if (d)
+        closedir(d);
+    return found;
+}
+
+/* LXC's proc:mixed makes /proc/sys read-only but leaves /proc/sys/net
+ * writable: those settings belong to the container's own network namespace,
+ * and Android cannot bring a network up without them. Its network stack sets
+ * per-interface IPv6 options before it asks for an address, and when that
+ * write fails it gives up on the interface: no address, no default network, no
+ * internet for any app. */
+static void protect_proc_sys(void)
+{
+    const char *stage = "/tmp/.ds-waydroid-sysnet";
+    char phone_if[64] = "";
+    bool keep_net = exists("/proc/sys/net");
+
+    if (keep_net && sees_phone_network(phone_if, sizeof(phone_if))) {
+        WARN("network: the container shares the phone's network (%s is visible).", phone_if);
+        WARN("network: Android would rewrite the phone's routing; its network settings stay");
+        WARN("network: read-only and Android gets no network. Set the network mode to NAT.");
+        keep_net = false;
+    }
+    if (keep_net) {
+        mkdir(stage, 0755);
+        if (mount("/proc/sys/net", stage, NULL, MS_BIND | MS_REC, NULL) < 0) {
+            WARN("/proc/sys/net: cannot keep it writable: %s", strerror(errno));
+            keep_net = false;
+        } else {
+            /* Droidspaces may already have made /proc/sys read-only. */
+            mount(NULL, stage, NULL, MS_BIND | MS_REMOUNT | mount_flags_of(stage), NULL);
+        }
+    }
+
+    make_read_only("/proc/sys");
+
+    if (keep_net) {
+        if (mount(stage, "/proc/sys/net", NULL, MS_BIND | MS_REC, NULL) < 0)
+            WARN("/proc/sys/net: cannot keep it writable: %s", strerror(errno));
+        umount2(stage, MNT_DETACH);
+    }
+    rmdir(stage);
+    if (exists("/proc/sys/net/ipv4/tcp_fwmark_accept")) {
+        bool writable = access("/proc/sys/net/ipv4/tcp_fwmark_accept", W_OK) == 0;
+        if (writable)
+            INFO("protect: /proc/sys/net stays writable (the container's own network settings)");
+        else
+            WARN("/proc/sys/net is read-only: Android will not be able to bring its network up");
+    }
+}
+
 static void protect_host(void)
 {
-    make_read_only("/proc/sys");
+    protect_proc_sys();
     make_read_only("/proc/sysrq-trigger");
     make_read_only("/sys");
     isolate_cgroups();
+}
+
+/* ------------------------------------------------------------------------- */
+/* Sound                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/* Waydroid's audio HAL is a PulseAudio client. On a Linux host Waydroid puts
+ * the user's PulseAudio socket at /run/xdg/pulse/native (the directory named by
+ * waydroid.pulse_runtime_path). Droidspaces, with "Configure PulseAudio" on,
+ * runs PulseAudio in Termux and bind-mounts its socket to /tmp/.pulse-socket.
+ * Put that socket where the HAL looks. Must run before /tmp is replaced. */
+#define DS_PULSE_SOCKET   "/tmp/.pulse-socket"
+#define HAL_PULSE_DIR     "/run/xdg/pulse"
+#define HAL_PULSE_SOCKET  HAL_PULSE_DIR "/native"
+
+static void setup_audio(void)
+{
+    struct stat st;
+    mkdir(HAL_PULSE_DIR, 0755);
+    chmod(HAL_PULSE_DIR, 0755);
+    umount2(HAL_PULSE_SOCKET, MNT_DETACH); /* left over from a previous boot */
+
+    if (stat(DS_PULSE_SOCKET, &st) < 0 || !S_ISSOCK(st.st_mode)) {
+        unlink(HAL_PULSE_SOCKET);
+        WARN("sound: no PulseAudio socket at %s, Android will be silent.", DS_PULSE_SOCKET);
+        WARN("sound: turn on \"Configure PulseAudio\" for this container in Droidspaces");
+        WARN("sound: (it needs Termux with Droidspaces' setup script, see the documentation).");
+        return;
+    }
+    if (lstat(HAL_PULSE_SOCKET, &st) == 0 && !S_ISREG(st.st_mode))
+        unlink(HAL_PULSE_SOCKET);
+    if (touch(HAL_PULSE_SOCKET) < 0 ||
+        mount(DS_PULSE_SOCKET, HAL_PULSE_SOCKET, NULL, MS_BIND, NULL) < 0) {
+        WARN("sound: cannot place the PulseAudio socket at %s: %s", HAL_PULSE_SOCKET,
+             strerror(errno));
+        return;
+    }
+    INFO("sound: PulseAudio from Droidspaces is connected to Android's audio (%s)",
+         HAL_PULSE_SOCKET);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1063,6 +1170,11 @@ static void describe_environment(void)
          access("/sys/kernel", W_OK) == 0 ? "yes" : "no");
     INFO("/run/display.sock (Anland): %s",
          exists("/run/display.sock") ? "present" : "MISSING - enable Anland Display in Droidspaces");
+    report_dir("network interfaces", "/sys/class/net");
+    if (!exists("/sys/class/net/eth0"))
+        WARN("network: there is no eth0, Android will have no network. Set the network mode to NAT.");
+    INFO("PulseAudio socket from Droidspaces (%s): %s", DS_PULSE_SOCKET,
+         exists(DS_PULSE_SOCKET) ? "present" : "absent");
     INFO("/dev/kgsl-3d0: %s", exists("/dev/kgsl-3d0") ? "present" : "absent");
     report_dir("/dev/dri", "/dev/dri");
     report_dir("/dev/dma_heap", "/dev/dma_heap");
@@ -1126,17 +1238,19 @@ int main(int argc, char **argv)
     if (!exists("/sys/kernel") && mount("sysfs", "/sys", "sysfs", MS_RDONLY, NULL) < 0)
         WARN("/sys is not mounted and could not be mounted: %s", strerror(errno));
 
+    /* Where the bridge puts its Wayland socket for the Android composer, and
+     * where Android's audio finds PulseAudio. */
+    mkdir("/run", 0755);
+    mkdir("/run/xdg", 0777);
+    chmod("/run/xdg", 0777);
+    setup_audio();
+
     if (!is_mountpoint("/tmp") &&
         mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777") < 0) {
         FAIL("cannot mount a tmpfs on /tmp: %s (the container is not allowed to mount)",
              strerror(errno));
         goto stuck;
     }
-
-    /* Where the bridge puts its Wayland socket for the Android composer. */
-    mkdir("/run", 0755);
-    mkdir("/run/xdg", 0777);
-    chmod("/run/xdg", 0777);
 
     /* Android treats /data as its own mount; give it one. */
     if (!is_mountpoint("/data") && mount("/data", "/data", NULL, MS_BIND | MS_REC, NULL) < 0)

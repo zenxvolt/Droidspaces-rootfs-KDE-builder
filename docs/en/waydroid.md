@@ -26,8 +26,9 @@ Droidspaces container
 | Mouse | A left click or drag is delivered as a finger tap or swipe. No pointer, no wheel. |
 | GPU acceleration | Snapdragon (Adreno) only, OpenGL ES through Mesa freedreno on KGSL. Optional Vulkan (Mesa turnip). OpenGL ES was verified on Adreno 725. Vulkan still needs testing on a phone. |
 | Clipboard | Plain text can be copied and pasted between Anland and Android in Waydroid. |
-| Sound, camera, sensors | Not available. |
-| Network | Jelly loaded an HTTPS test page through Droidspaces NAT in a Linux VM. TCP timeouts in Jelly on the test phone remain open. |
+| Sound | Plays from the Anland app, through Anland's own audio channel like a Linux desktop on Anland. No Termux or PulseAudio setup is needed. |
+| Camera, sensors, microphone | Not available. |
+| Network | Droidspaces' NAT network; Android gets its address by DHCP like on a Waydroid host. Jelly loaded an HTTPS test page through Droidspaces NAT in a Linux VM. |
 
 ## Requirements
 
@@ -67,7 +68,8 @@ sudo ./waydroid/build-waydroid-rootfs.sh -G gpu-aarch64
    - turn **privileged mode** on with `nocaps` and `noseccomp`;
    - turn **SELinux permissive** on;
    - on a Snapdragon phone, turn **Hardware Access** on so Android can use the GPU;
-   - keep the network on **NAT**;
+   - keep the network on **NAT** (in host mode Android would rewrite the phone's routing, so it gets no network there);
+   - keep **Configure PulseAudio** off, as Anland recommends: sound goes through the Anland app;
    - leave the init program at its default (`/sbin/init`).
 3. Start the container, then use **Launch Anland**.
 
@@ -128,6 +130,8 @@ Three places hold the answer, in the order things happen:
 
 Once Android is up, its log is also written to `/data/ds-waydroid-logcat.txt` in the rootfs (for a running sparse-image container: `/mnt/Droidspaces/<container name>/data/ds-waydroid-logcat.txt`), so it can be read from the phone without entering the container. The log of the start before is kept as `ds-waydroid-logcat.previous.txt`, and the bridge's as `ds-waydroid-bridge.log.previous`, which matters after an automatic switch to CPU drawing.
 
+For network or sound problems, run `ds-waydroid-diag` in a shell inside the container: it writes `/ds-waydroid-diag.txt` in the rootfs with the addresses, routes, what Android's network service decided, the sound setup and the matching `logcat` lines. Send it along with `/ds-waydroid-boot.log`.
+
 | Message | Meaning |
 | --- | --- |
 | `binder: cannot mount binderfs` | The kernel has no binderfs, or the container may not mount it. Check privileged mode and SELinux permissive. Without binderfs in the kernel this cannot work. |
@@ -142,6 +146,9 @@ Once Android is up, its log is also written to `/data/ds-waydroid-logcat.txt` in
 | `gpu: the GPU driver failed before` in the boot log | SurfaceFlinger crashed three times with the GPU driver, so Android was restarted with CPU drawing (a GPU fault also makes the phone's own screen stutter). Delete `/data/ds-gpu-failed` in the rootfs, or set `gpu.mode=on`, to try the GPU again. The failed start's logs are kept as `/data/ds-gpu-failed.logcat.txt` and `/data/ds-gpu-failed.bridge.log`; please include them in a report. |
 | Black screen or Android restarting after switching to the GPU | Set `gpu.mode=off` in the settings file to go back to CPU drawing, and send `logcat` lines from `SurfaceFlinger`, `libEGL`, `MESA` and `gralloc.dmaheap`. |
 | `gralloc: couldn't create ashmem` | Android could not allocate a graphics buffer. Current builds default to `sys.use_memfd=true` even when Hardware Access exposes an ashmem device. For an older image, add `sys.use_memfd=true` to `/system/etc/droidspaces-waydroid.conf` and restart the container. |
+| `network: there is no eth0` | The container has no network of its own. Set the network mode to **NAT**. |
+| `network: the container shares the phone's network` | The network mode is host. Set it to **NAT**. |
+| `/proc/sys/net is read-only` | Android cannot bring its network up. Include this report when asking for help. |
 
 Anland's display path records three milestones in the bridge log. `Anland app connected` confirms that the bridge mapped the app's buffers. `received Android frame` confirms that Waydroid's hardware composer submitted a frame. `presented the first Android frame to Anland` confirms that the bridge copied it and sent the render completion. If the log stops at `Anland app connected`, check the container's `logcat` for messages from the hardware composer and `SurfaceFlinger`.
 
@@ -179,7 +186,7 @@ Android's boot scripts assume they own the machine. They tune the scheduler and 
 
 `/sbin/init` therefore rebuilds LXC's protections before it starts Android:
 
-- `/proc/sys`, `/proc/sysrq-trigger` and `/sys` are read-only for Android;
+- `/proc/sys`, `/proc/sysrq-trigger` and `/sys` are read-only for Android. The exception is `/proc/sys/net`, as with LXC: it holds only the settings of the container's own network, and Android needs to write them to bring its network up (builds before this was fixed had no network in apps);
 - Android gets a cgroup subtree of its own, so it cannot see or rewrite the phone's `top-app`, `background` and other groups;
 - the capabilities are reduced to the set Waydroid's LXC configuration keeps (no kernel modules, no raw hardware access).
 
