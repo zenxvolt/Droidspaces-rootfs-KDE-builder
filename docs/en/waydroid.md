@@ -81,7 +81,7 @@ One file inside the rootfs holds all settings: `/system/etc/droidspaces-waydroid
 | `gpu.mode` | `auto` (default) uses the Adreno GPU when `/dev/kgsl-3d0` and a dma-buf heap can be opened, otherwise the CPU. `off` always draws with the CPU. `on` uses the GPU driver even when the checks fail (troubleshooting only). |
 | `gpu.vulkan` | `1` also offers Vulkan (Mesa turnip) to apps and games. Default `0`. |
 | `bridge.render_scale` | Percentage of the screen resolution Android renders at. `auto` (default) is `100` with the GPU and `50` with the CPU. `50` draws a quarter of the pixels and enlarges the picture, which looks blurry. |
-| `bridge.ui_width_dp` | Chooses Android's density so the short screen side is this many dp. `400` looks like a normal phone; larger makes everything smaller. |
+| `bridge.ui_width_dp` | Sets density before SurfaceFlinger starts, using the short side of `bridge.default_width` / `bridge.default_height` after applying `render_scale`. `400` suits a phone. Lower values make the UI larger. An explicit `ro.sf.lcd_density` takes precedence. |
 | `bridge.max_fps` | Highest frame rate Android may produce. `auto` (default) is `60` with the GPU and `30` with the CPU. |
 | `bridge.gpu_copy` | Who copies Android's frames into the Anland buffer. `auto` (default) lets the GPU do it when Android draws with the GPU. `0` always uses the CPU. |
 | `bridge.wait_for_display` | Seconds Android's display start waits for the Anland app before using the default size. |
@@ -103,6 +103,17 @@ Either way:
 - Droidspaces can limit the processor share of the container (CPU limit in the container settings) if the phone gets too warm.
 
 `/ds-waydroid-boot.log` says which drawing mode was chosen (lines starting with `gpu:`). `/ds-waydroid-bridge.log` says `drawn by the GPU` or `drawn by the CPU` when the first frame arrives, and `copied by the GPU` or `copied by the CPU` when it reaches Anland.
+
+### Frame rate and GPU benchmark
+
+Open Anland and scroll through the same screen during the 15-second sample. Replace `Waydroid` if your container has a different name.
+
+```sh
+su -c 'R="/mnt/Droidspaces/Waydroid"; sh "$R/system/bin/ds-waydroid-benchmark" "$R" 15'
+```
+
+- **Android FPS** counts frame submissions from the composer. **Anland new FPS** counts new frames successfully submitted to Anland by the bridge. It excludes repeats, blank acknowledgments and copies of a frame to the other buffers in the pool. The phone panel is outside the scope of this measurement.
+- **Configured rendering**, whether the bridge can open `/dev/kgsl-3d0`, and the `dma-buf` frame count describe the GPU path. **Buffer copies** shows which processor performs the copies. Running `/system/bin/ds-waydroid-benchmark / 15` inside Waydroid also includes SurfaceFlinger's GLES renderer when available.
 
 ## 4. When it does not work
 

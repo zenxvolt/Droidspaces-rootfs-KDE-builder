@@ -82,6 +82,7 @@ common_checks() {
   check "the Waydroid composer can create its touch FIFO" has "^Android system user can create a touch FIFO: yes$" "$MOCK"
   check "the Wayland socket directory exists" has "node /run/xdg  *directory" "$MOCK"
   check "properties were generated from the config" has "^prop ro.hardware.gralloc=default" "$MOCK"
+  check "the CPU density is set before Android init" has "^prop ro.sf.lcd_density=216$" "$MOCK"
   check "bridge settings are not leaked into properties" hasnt "^prop bridge\." "$MOCK"
   check "gpu settings are not leaked into properties" hasnt "^prop gpu\." "$MOCK"
   check "without the GPU driver files Android draws with the CPU" has "^prop ro.hardware.egl=swiftshader$" "$MOCK"

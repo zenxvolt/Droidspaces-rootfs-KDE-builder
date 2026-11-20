@@ -29,6 +29,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -54,6 +55,7 @@
 #include "xdg-shell-server-protocol.h"
 #include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "display_producer.h"
+#include "display-geometry.h"
 #include "gpu-copy-protocol.h"
 
 /* ------------------------------------------------------------------------- */
@@ -141,6 +143,7 @@ struct config {
     char runtime_dir[PATH_MAX];
     char display_name[64];
     char log_path[PATH_MAX];
+    char benchmark_path[PATH_MAX];
     int default_width, default_height;
     int render_scale;        /* percent of the real screen Android renders at, -1 = auto */
     int max_fps;             /* -1 = auto */
@@ -157,6 +160,7 @@ struct target {
     int fd;
     struct buf_info info;
     uint64_t frame_serial;
+    bool has_frame;
 };
 
 struct bridge;
@@ -224,8 +228,12 @@ struct bridge {
     uint32_t gc_targets;     /* bit per Anland buffer the helper has imported */
     uint32_t gc_next_id;
 
-    /* Stats */
-    uint64_t frames, last_stats_ms, last_frames;
+    /* Cumulative counts, sampled only while the benchmark requests them. */
+    uint64_t shm_frames, dmabuf_frames, delivered_frames, ack_count;
+    uint64_t cpu_copies, gpu_copies, failed_copies;
+    uint64_t last_delivered_serial, session_serial;
+    uint64_t next_sample_ms, last_stats_ms, last_frames;
+    int kgsl_open; /* 0 = not checked, 1 = accessible, -1 = unavailable */
 };
 
 static void maybe_present(struct bridge *b);
@@ -1018,13 +1026,6 @@ static void bind_linux_dmabuf(struct wl_client *c, void *data, uint32_t version,
 /* Geometry                                                                  */
 /* ------------------------------------------------------------------------- */
 
-static uint32_t scaled_dim(uint32_t v, int percent)
-{
-    uint32_t r = (uint32_t)(((uint64_t)v * (uint32_t)percent + 50) / 100);
-    r &= ~1u; /* keep it even, some Android paths dislike odd sizes */
-    return r < 64 ? 64 : r;
-}
-
 static uint32_t advertised_refresh(struct bridge *b)
 {
     uint32_t cap = (uint32_t)b->cfg.max_fps * 1000u;
@@ -1083,6 +1084,7 @@ static void session_teardown(struct bridge *b)
     gc_reset_targets(b);
     b->target_ready = false;
     b->first_frame_presented = false;
+    b->last_delivered_serial = 0;
     b->next_present_ms = 0;
     if (b->session)
         INFO("Anland app disconnected; Android keeps running, waiting for it to come back");
@@ -1291,6 +1293,7 @@ static bool session_start(struct bridge *b)
 
     set_client_size(b, scaled_dim(b->screen_w, b->cfg.render_scale),
                     scaled_dim(b->screen_h, b->cfg.render_scale), true);
+    b->session_serial++;
     return true;
 }
 
@@ -1368,11 +1371,19 @@ static void maybe_present(struct bridge *b)
     bool copied = false, by_gpu = false;
     int fence = -1;
     if (target->frame_serial != b->frame_serial) {
-        if (b->top && b->top->buffer)
+        if (b->top && b->top->buffer) {
             copied = copy_buffer(b, b->top->buffer, target, idx, &fence, &by_gpu);
+            if (!copied)
+                b->failed_copies++;
+            else if (by_gpu)
+                b->gpu_copies++;
+            else
+                b->cpu_copies++;
+        }
         if (!copied)
             clear_target(target);
         target->frame_serial = b->frame_serial;
+        target->has_frame = copied;
     }
     /* Anland waits for the GPU's copy on the GPU, not here. */
     if (fence >= 0)
@@ -1383,6 +1394,11 @@ static void maybe_present(struct bridge *b)
     b->target_ready = false;
     if (trigger_refresh(b->ctx) < 0)
         return;
+    b->ack_count++;
+    if (target->has_frame && target->frame_serial != b->last_delivered_serial) {
+        b->last_delivered_serial = target->frame_serial;
+        b->delivered_frames++;
+    }
     uint32_t refresh = advertised_refresh(b);
     b->next_present_ms = now + (1000000u + refresh - 1) / refresh;
     if (copied && !b->first_frame_presented) {
@@ -1390,7 +1406,6 @@ static void maybe_present(struct bridge *b)
              by_gpu ? "GPU" : "CPU");
         b->first_frame_presented = true;
     }
-    b->frames++;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1571,6 +1586,10 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r)
                  dmabuf->format);
     }
     surface_set_buffer(s, buffer);
+    if (shm)
+        b->shm_frames++;
+    else
+        b->dmabuf_frames++;
     b->frame_serial++;
     maybe_present(b);
 }
@@ -1728,20 +1747,13 @@ static bool android_setprop(const char *name, const char *value)
     return ok;
 }
 
-/* Android reads its screen density once, when SurfaceFlinger starts, which is
- * right after the composer learns the window size from us. Choosing it here
- * keeps the interface the same physical size whatever resolution (or
- * render_scale) is in use. A density set in the config file wins, because a
- * read-only property can only be set once. */
+/* For older rootfs starters that leave the property unset, advertise a
+ * density to the composer. New starters set it before SurfaceFlinger starts. */
 static void choose_density(struct bridge *b)
 {
     if (b->cfg.ui_width_dp <= 0)
         return;
-    uint32_t shorter = b->client_w < b->client_h ? b->client_w : b->client_h;
-    int density = (int)((shorter * 160u + (uint32_t)b->cfg.ui_width_dp / 2) /
-                        (uint32_t)b->cfg.ui_width_dp);
-    if (density < 120) density = 120;
-    if (density > 640) density = 640;
+    int density = display_density(b->client_w, b->client_h, b->cfg.ui_width_dp);
     char value[16];
     snprintf(value, sizeof(value), "%d", density);
     if (android_setprop("ro.sf.lcd_density", value))
@@ -2073,6 +2085,44 @@ static void fire_frame_callbacks(struct bridge *b)
     }
 }
 
+static void publish_benchmark(struct bridge *b, uint64_t now)
+{
+    if (!b->cfg.benchmark_path[0] || now < b->next_sample_ms)
+        return;
+    b->next_sample_ms = now + 500;
+
+    char request[PATH_MAX + 16];
+    snprintf(request, sizeof(request), "%s.request", b->cfg.benchmark_path);
+    struct stat st;
+    time_t wall = time(NULL);
+    if (lstat(request, &st) < 0 || !S_ISREG(st.st_mode) ||
+        st.st_mtime > wall || wall - st.st_mtime > 3)
+        return;
+
+    if (!b->kgsl_open) {
+        int gpu_fd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
+        b->kgsl_open = gpu_fd >= 0 ? 1 : -1;
+        if (gpu_fd >= 0)
+            close(gpu_fd);
+    }
+    char snapshot[PATH_MAX + 16], temporary[PATH_MAX + 16];
+    snprintf(snapshot, sizeof(snapshot), "%s.stats", b->cfg.benchmark_path);
+    snprintf(temporary, sizeof(temporary), "%s.stats.XXXXXX", b->cfg.benchmark_path);
+    int fd = mkostemp(temporary, O_CLOEXEC);
+    if (fd < 0)
+        return;
+    int written = dprintf(fd,
+        "1 %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %d %d %d %u %u %u %u %u %u"
+        " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+        " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+        (int)getpid(), b->start_ms, b->session_serial, now, b->session,
+        b->cfg.gpu, b->kgsl_open, b->client_w, b->client_h, b->screen_w, b->screen_h,
+        b->refresh_mhz, advertised_refresh(b), b->shm_frames, b->dmabuf_frames,
+        b->delivered_frames, b->ack_count, b->cpu_copies, b->gpu_copies, b->failed_copies);
+    if (close(fd) < 0 || written < 0 || rename(temporary, snapshot) < 0)
+        unlink(temporary);
+}
+
 static int on_tick(void *data)
 {
     struct bridge *b = data;
@@ -2092,11 +2142,12 @@ static int on_tick(void *data)
     fire_frame_callbacks(b);
 
     uint64_t now = now_ms64();
+    publish_benchmark(b, now);
     if (g_verbose && now - b->last_stats_ms >= 5000) {
-        DBG("%.1f frames/s shown, session=%d", (b->frames - b->last_frames) * 1000.0 /
+        DBG("%.1f new frames/s sent, session=%d", (b->delivered_frames - b->last_frames) * 1000.0 /
             (double)(now - b->last_stats_ms), b->session);
         b->last_stats_ms = now;
-        b->last_frames = b->frames;
+        b->last_frames = b->delivered_frames;
     }
 
     /* Frames and input arrive as events on their own descriptors, so with a
@@ -2170,6 +2221,8 @@ static void config_set(struct config *c, const char *key, const char *value)
         snprintf(c->display_name, sizeof(c->display_name), "%s", value);
     else if (!strcmp(key, "log"))
         snprintf(c->log_path, sizeof(c->log_path), "%s", value);
+    else if (!strcmp(key, "benchmark_path"))
+        snprintf(c->benchmark_path, sizeof(c->benchmark_path), "%s", value);
     else if (!strcmp(key, "default_width"))
         c->default_width = atoi(value);
     else if (!strcmp(key, "default_height"))
@@ -2247,8 +2300,8 @@ static void config_resolve_auto(struct config *c)
 
 static void config_clamp(struct config *c)
 {
-    if (c->default_width < 64 || c->default_width > 16384) c->default_width = 1080;
-    if (c->default_height < 64 || c->default_height > 16384) c->default_height = 1920;
+    if (c->default_width < 64 || c->default_width > 16384) c->default_width = DEFAULT_DISPLAY_WIDTH;
+    if (c->default_height < 64 || c->default_height > 16384) c->default_height = DEFAULT_DISPLAY_HEIGHT;
     if (c->render_scale < 10 || c->render_scale > 100) c->render_scale = 100;
     if (c->max_fps < 1 || c->max_fps > 240) c->max_fps = 60;
     if (c->wait_for_display_ms < 0 || c->wait_for_display_ms > 600000)
@@ -2276,6 +2329,7 @@ static void usage(const char *argv0)
         "  --wait_for_display S   seconds to wait for the Anland app before using the default size\n"
         "  --ui_width_dp N        choose Android's density so the short screen side is N dp (0 = off)\n"
         "  --log FILE             also write messages to FILE\n"
+        "  --benchmark_path PATH  prefix for the on-demand benchmark files\n"
         "  --verbose 1            extra messages\n", argv0);
 }
 
@@ -2288,8 +2342,9 @@ int main(int argc, char **argv)
     snprintf(c->anland_socket, sizeof(c->anland_socket), "/run/display.sock");
     snprintf(c->runtime_dir, sizeof(c->runtime_dir), "/run/xdg");
     snprintf(c->display_name, sizeof(c->display_name), "wayland-0");
-    c->default_width = 1080;
-    c->default_height = 1920;
+    snprintf(c->benchmark_path, sizeof(c->benchmark_path), "/ds-waydroid-benchmark");
+    c->default_width = DEFAULT_DISPLAY_WIDTH;
+    c->default_height = DEFAULT_DISPLAY_HEIGHT;
     c->render_scale = -1;
     c->max_fps = -1;
     c->gpu = -1;
@@ -2336,8 +2391,8 @@ int main(int argc, char **argv)
     b->last_stats_ms = b->start_ms;
     b->frame_serial = 1; /* Newly mapped Anland buffers start unwritten (serial 0). */
     b->refresh_mhz = 60000;
-    b->client_w = (uint32_t)c->default_width;
-    b->client_h = (uint32_t)c->default_height;
+    b->client_w = scaled_dim((uint32_t)c->default_width, c->render_scale);
+    b->client_h = scaled_dim((uint32_t)c->default_height, c->render_scale);
     b->gc_sock = -1;
 
     if (mkdir_p(c->runtime_dir, 0777) < 0)

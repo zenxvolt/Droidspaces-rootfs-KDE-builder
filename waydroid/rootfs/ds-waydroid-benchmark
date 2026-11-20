@@ -1,0 +1,95 @@
+#!/system/bin/sh
+# Sample the Anland bridge from a mounted rootfs or from inside Waydroid.
+set -eu
+
+root=${1:-/mnt/Droidspaces/Waydroid}
+seconds=${2:-15}
+case "$seconds" in
+    [1-9]|[1-5][0-9]|60) ;;
+    *) echo "Usage: ds-waydroid-benchmark [rootfs path] [seconds 1-60]" >&2; exit 2 ;;
+esac
+
+prefix=${root%/}/ds-waydroid-benchmark
+request=$prefix.request
+snapshot=$prefix.stats
+
+read_sample() {
+    [ -r "$snapshot" ] &&
+        read -r version pid started session ms connected gpu kgsl width height out_w out_h \
+            refresh limit shm dmabuf delivered acks cpu_copies gpu_copies failed extra < "$snapshot" &&
+        [ "$version" = 1 ] && [ -n "$failed" ] && [ -z "$extra" ]
+}
+
+fps10() {
+    echo $(( $1 * 10000 / $2 ))
+}
+
+decimal() {
+    printf '%d.%d' "$(( $1 / 10 ))" "$(( $1 % 10 ))"
+}
+
+old_ms=0
+if read_sample; then old_ms=$ms; fi
+printf 'Preparing a %s-second sample. Keep Anland open and scroll or animate the same screen.\n' "$seconds"
+attempt=0
+while :; do
+    touch "$request"
+    sleep 1
+    if read_sample && [ "$ms" != "$old_ms" ] && [ "$connected" = 1 ]; then break; fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 5 ]; then
+        echo "No fresh sample. Open Anland and check that the updated bridge is running." >&2
+        exit 1
+    fi
+done
+
+id=$pid:$started:$session
+start_ms=$ms
+start_shm=$shm start_dmabuf=$dmabuf start_delivered=$delivered start_acks=$acks
+start_cpu=$cpu_copies start_gpu=$gpu_copies start_failed=$failed
+last_ms=$ms last_received=$((shm + dmabuf)) last_delivered=$delivered
+min_fps=-1 max_fps=0 missed=0
+
+while [ "$((last_ms - start_ms))" -lt "$((seconds * 1000))" ]; do
+    touch "$request"
+    sleep 1
+    if ! read_sample || [ "$id" != "$pid:$started:$session" ] || [ "$connected" != 1 ]; then
+        echo "Anland disconnected or the bridge restarted during the sample." >&2
+        exit 1
+    fi
+    if [ "$ms" -eq "$last_ms" ]; then
+        missed=$((missed + 1))
+        if [ "$missed" -ge 3 ]; then echo "Benchmark samples stopped arriving." >&2; exit 1; fi
+        continue
+    fi
+    missed=0
+    window=$((ms - last_ms))
+    received=$((shm + dmabuf))
+    rate=$(fps10 "$((delivered - last_delivered))" "$window")
+    if [ "$min_fps" -lt 0 ] || [ "$rate" -lt "$min_fps" ]; then min_fps=$rate; fi
+    if [ "$rate" -gt "$max_fps" ]; then max_fps=$rate; fi
+    printf '%4d ms  Android %5s FPS  Anland %5s new FPS\n' "$((ms - start_ms))" \
+        "$(decimal "$(fps10 "$((received - last_received))" "$window")")" "$(decimal "$rate")"
+    last_ms=$ms last_received=$received last_delivered=$delivered
+done
+
+elapsed=$((ms - start_ms))
+shm=$((shm - start_shm)) dmabuf=$((dmabuf - start_dmabuf))
+delivered=$((delivered - start_delivered)) acks=$((acks - start_acks))
+if [ "$gpu" = 1 ]; then mode=Adreno/KGSL; else mode=CPU; fi
+if [ "$kgsl" = 1 ]; then access=opened; else access=unavailable; fi
+
+printf '\nSampled %s ms | Android %sx%s | Anland %sx%s | refresh %s Hz | advertised %s Hz\n' \
+    "$elapsed" "$width" "$height" "$out_w" "$out_h" \
+    "$(decimal "$((refresh / 100))")" "$(decimal "$((limit / 100))")"
+printf 'Configured rendering: %s | /dev/kgsl-3d0 from bridge: %s\n' "$mode" "$access"
+printf 'Android commits: %s shm, %s dma-buf (%s FPS)\n' "$shm" "$dmabuf" \
+    "$(decimal "$(fps10 "$((shm + dmabuf))" "$elapsed")")"
+printf 'Anland new submissions: %s (%s FPS, min %s / max %s per sample)\n' \
+    "$delivered" "$(decimal "$(fps10 "$delivered" "$elapsed")")" "$(decimal "$min_fps")" "$(decimal "$max_fps")"
+printf 'Other ACKs: %s (repeated or blank buffers)\n' "$((acks - delivered))"
+printf 'Buffer copies: %s CPU, %s GPU, %s failed\n' \
+    "$((cpu_copies - start_cpu))" "$((gpu_copies - start_gpu))" "$((failed - start_failed))"
+if [ "$root" = / ]; then
+    dumpsys SurfaceFlinger 2>/dev/null | grep -m 1 '^GLES:' || true
+fi

@@ -81,7 +81,7 @@ Semua pengaturan ada di satu berkas di dalam rootfs: `/system/etc/droidspaces-wa
 | `gpu.mode` | `auto` (bawaan) memakai GPU Adreno bila `/dev/kgsl-3d0` dan dma-buf heap bisa dibuka, selain itu CPU. `off` selalu menggambar dengan CPU. `on` memakai driver GPU walaupun pemeriksaannya gagal (hanya untuk mencari masalah). |
 | `gpu.vulkan` | `1` juga menyediakan Vulkan (Mesa turnip) untuk aplikasi dan game. Bawaan `0`. |
 | `bridge.render_scale` | Persentase resolusi layar yang dipakai Android untuk menggambar. `auto` (bawaan) berarti `100` dengan GPU dan `50` dengan CPU. `50` menggambar seperempat jumlah piksel lalu memperbesarnya, sehingga terlihat buram. |
-| `bridge.ui_width_dp` | Memilih kepadatan layar Android supaya sisi pendek layar selebar sekian dp. `400` terlihat seperti ponsel biasa; angka lebih besar membuat semuanya lebih kecil. |
+| `bridge.ui_width_dp` | Menentukan kepadatan sebelum SurfaceFlinger mulai, berdasarkan sisi pendek `bridge.default_width` / `bridge.default_height` setelah `render_scale` diterapkan. `400` cocok untuk ponsel. Angka lebih kecil memperbesar UI. `ro.sf.lcd_density` eksplisit punya prioritas. |
 | `bridge.max_fps` | Laju frame tertinggi yang boleh dihasilkan Android. `auto` (bawaan) berarti `60` dengan GPU dan `30` dengan CPU. |
 | `bridge.gpu_copy` | Siapa yang menyalin frame Android ke buffer Anland. `auto` (bawaan) menyerahkannya ke GPU bila Android menggambar dengan GPU. `0` selalu memakai CPU. |
 | `bridge.wait_for_display` | Berapa detik Android menunggu aplikasi Anland sebelum memakai ukuran bawaan. |
@@ -103,6 +103,17 @@ Pada kedua mode:
 - Droidspaces bisa membatasi jatah prosesor untuk container (batas CPU di pengaturan container) bila ponsel terlalu panas.
 
 `/ds-waydroid-boot.log` mencatat mode mana yang dipilih (baris berawalan `gpu:`). `/ds-waydroid-bridge.log` menulis `drawn by the GPU` atau `drawn by the CPU` saat frame pertama datang, dan `copied by the GPU` atau `copied by the CPU` saat frame itu sampai di Anland.
+
+### Benchmark frame rate dan akses GPU
+
+Buka Anland dan gulir layar yang sama selama 15 detik. Ganti `Waydroid` dengan nama container jika berbeda.
+
+```sh
+su -c 'R="/mnt/Droidspaces/Waydroid"; sh "$R/system/bin/ds-waydroid-benchmark" "$R" 15'
+```
+
+- **Android FPS** menghitung frame dari composer. **Anland new FPS** menghitung frame baru yang bridge kirim melalui protokol Anland. Hitungan kedua mengabaikan pengulangan frame, ACK layar kosong, dan pengisian ulang buffer bergilir. FPS panel ponsel berada di luar cakupan pengukuran ini.
+- **Configured rendering**, hasil pembukaan `/dev/kgsl-3d0`, dan jumlah frame `dma-buf` menunjukkan jalur GPU yang tersedia dan beroperasi. **Buffer copies** menunjukkan pekerjaan penyalinan oleh CPU atau GPU. Jika dijalankan di dalam shell Waydroid dengan `/system/bin/ds-waydroid-benchmark / 15`, laporan juga menyertakan renderer GLES SurfaceFlinger jika tersedia.
 
 ## 4. Bila tidak berjalan
 

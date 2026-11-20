@@ -48,6 +48,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "display-geometry.h"
+
 #define CONFIG_PATH   "/system/etc/droidspaces-waydroid.conf"
 #define LOG_PATH      "/ds-waydroid-boot.log"
 #define OLD_LOG_PATH  "/ds-waydroid-boot.previous.log"
@@ -603,24 +605,60 @@ static void write_properties(const struct settings *st, bool gpu)
                  "# Edit that file instead; changes here are overwritten.\n", CONFIG_PATH);
     int count = 0;
     bool memfd_set = false;
+    bool android_gpu = gpu;
+    int bridge_gpu = -1, render_scale = -1, ui_width_dp = 0;
+    int width = DEFAULT_DISPLAY_WIDTH, height = DEFAULT_DISPLAY_HEIGHT;
     if (in) {
         char line[1024];
         while (fgets(line, sizeof(line), in)) {
             char *s = trim(line);
-            if (!*s || *s == '#' || !strchr(s, '='))
+            char *eq = strchr(s, '=');
+            if (!*s || *s == '#' || !eq)
                 continue;
-            if (!strncmp(s, "bridge.", 7))
+            if (!strncmp(s, "bridge.", 7)) {
+                *eq = 0;
+                const char *key = trim(s + 7), *value = trim(eq + 1);
+                if (!strcmp(key, "default_width"))
+                    width = atoi(value);
+                else if (!strcmp(key, "default_height"))
+                    height = atoi(value);
+                else if (!strcmp(key, "ui_width_dp"))
+                    ui_width_dp = atoi(value);
+                else if (!strcmp(key, "render_scale"))
+                    render_scale = !strcmp(value, "auto") ? -1 : atoi(value);
+                else if (!strcmp(key, "gpu"))
+                    bridge_gpu = !strcmp(value, "auto") ? -1 : atoi(value) != 0;
                 continue;
+            }
             if (!strncmp(s, "init.", 5) || !strncmp(s, "gpu.", 4))
                 continue;
             if (!strncmp(s, "sys.use_memfd=", 14))
                 memfd_set = true;
+            if (!strncmp(s, "ro.hardware.egl=", 16))
+                android_gpu = !strcmp(s + 16, "kgsl");
             fprintf(out, "%s\n", s);
             count++;
         }
         fclose(in);
     } else {
         WARN("%s is missing; using default rootfs properties", CONFIG_PATH);
+    }
+
+    /* SurfaceFlinger caches this property in its constructor, before the
+     * Wayland composer asks the bridge to configure the first window. */
+    if (ui_width_dp > 0 && ui_width_dp <= 2000) {
+        if (width < 64 || width > 16384) width = DEFAULT_DISPLAY_WIDTH;
+        if (height < 64 || height > 16384) height = DEFAULT_DISPLAY_HEIGHT;
+        if (render_scale < 0) render_scale = (bridge_gpu < 0 ? android_gpu : bridge_gpu) ? 100 : 50;
+        if (render_scale < 10 || render_scale > 100) render_scale = 100;
+        uint32_t w = scaled_dim((uint32_t)width, render_scale);
+        uint32_t h = scaled_dim((uint32_t)height, render_scale);
+        char density[16];
+        snprintf(density, sizeof(density), "%d", display_density(w, h, ui_width_dp));
+        if (default_property(out, "ro.sf.lcd_density", density)) {
+            INFO("display density: %s dpi for %ux%u (%d dp target)", density, w, h, ui_width_dp);
+            count++;
+        }
     }
     /* Hardware mode can expose /dev/ashmem even when Android services cannot
      * open it. Use memfd by default on both kinds of host. */

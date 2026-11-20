@@ -197,12 +197,20 @@ d="$T/idle"; mkdir -p "$d/xdg"
 echo "== idle"
 "$T/display_daemon" "$d/display.sock" >"$d/daemon.log" 2>&1 & PIDS+=("$!")
 "$BRIDGE" --anland_socket "$d/display.sock" --runtime_dir "$d/xdg" --log "$d/bridge.log" \
-  --render_scale 100 --max_fps 30 >"$d/bridge.out" 2>&1 & PIDS+=("$!")
+  --render_scale 100 --max_fps 30 --benchmark_path "$d/ds-waydroid-benchmark" \
+  >"$d/bridge.out" 2>&1 & PIDS+=("$!")
 timeout 25 "$T/fake-app" "$d/display.sock" 160 240 385 "$d/frame" idle >"$d/app.log" 2>&1 &
 app_pid=$!; PIDS+=("$app_pid")
 sleep 6
 XDG_RUNTIME_DIR="$d/xdg" WAYLAND_DISPLAY=wayland-0 "$T/fake-hwc" 1 25 >"$d/hwc.log" 2>&1 &
 hwc_pid=$!; PIDS+=("$hwc_pid")
+sleep 2
+check "the benchmark completes on a connected idle display" sh -c \
+  'sh "$1" "$2" 2 >"$2/benchmark.log" 2>&1' sh "$SCRIPT_DIR/../rootfs/ds-waydroid-benchmark" "$d"
+check "the benchmark counts no new frames when the screen is idle" \
+  grep -Fq "Anland new submissions: 0 (0.0 FPS" "$d/benchmark.log"
+check "the benchmark separates repeated acknowledgments from new frames" \
+  grep -Eq 'Other ACKs: [1-9][0-9]*' "$d/benchmark.log"
 app_rc=0
 wait "$app_pid" || app_rc=$?
 check "Anland stayed connected through startup and an idle screen" test "$app_rc" -eq 0
