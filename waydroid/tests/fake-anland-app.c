@@ -8,9 +8,10 @@
  * With AUDIO_OUT and SECONDS it also announces a 48 kHz stereo speaker on the
  * audio channel, like the app does, and saves the sound it receives there.
  *
- * Usage: fake-anland-app SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [AUDIO_OUT SECONDS]
+ * Usage: fake-anland-app SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [idle | AUDIO_OUT SECONDS]
  */
 #define _GNU_SOURCE
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,9 @@
 #include "display_consumer.h"
 
 #define NBUF 3
+
+static void connected(void *data) { *(bool *)data = true; }
+static void fell_back(void *data) { *(bool *)data = true; }
 
 static void send_audio_format(int fd, uint32_t role, uint32_t channels)
 {
@@ -86,7 +90,7 @@ static void save_ppm(const char *path, const uint8_t *px, uint32_t w, uint32_t h
 int main(int argc, char **argv)
 {
     if (argc < 6) {
-        fprintf(stderr, "usage: %s SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [AUDIO_OUT SECONDS]\n",
+        fprintf(stderr, "usage: %s SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [idle | AUDIO_OUT SECONDS]\n",
                 argv[0]);
         return 2;
     }
@@ -94,6 +98,7 @@ int main(int argc, char **argv)
     uint32_t w = (uint32_t)atoi(argv[2]), h = (uint32_t)atoi(argv[3]);
     int frames = atoi(argv[4]);
     const char *prefix = argv[5];
+    bool idle_test = argc > 6 && !strcmp(argv[6], "idle");
 
     /* A stride wider than the picture, like real graphics buffers often have. */
     uint32_t stride = (w + 16) * 4;
@@ -120,7 +125,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "fake-app: cannot connect to %s\n", sock);
         return 1;
     }
-    set_screen_info(ctx, w, h, 1, 60000);
+    bool active = false, timed_out = false;
+    if (idle_test) {
+        set_exit_fallback_callback(ctx, connected, &active);
+        set_fallback_callback(ctx, fell_back, &timed_out);
+    }
+    const char *refresh_mhz = getenv("FAKE_ANLAND_REFRESH_MHZ");
+    set_screen_info(ctx, w, h, 1, refresh_mhz ? (uint32_t)atoi(refresh_mhz) : 60000);
     push_dmabufs(ctx, fds, infos, NBUF);
     printf("fake-app: connected, offering %d buffers of %ux%u\n", NBUF, w, h);
     fflush(stdout);
@@ -148,27 +159,50 @@ int main(int argc, char **argv)
         return bytes > 0 ? 0 : 1;
     }
 
-    int got = 0;
+    int got = 0, fences = 0;
+    bool copied = false;
     for (int attempt = 0; attempt < 2000 && got < frames; attempt++) {
         int idx = got % NBUF;
-        maps[idx][3] = 0x55; /* sentinel: the bridge always writes an opaque alpha here */
         if (select_dmabuf(ctx, idx) < 0) {
             usleep(20000);
             continue;
         }
         int fence = refresh_done(ctx);
-        if (fence == -1 && maps[idx][3] == 0x55) {
-            /* nothing was drawn: no producer yet, or it has no frame for us */
+        if (fence >= 0) {
+            fences++;
+            close(fence);
+        }
+        if (timed_out) {
+            fprintf(stderr, "fake-app: lost the Anland session while waiting for a frame\n");
+            break;
+        }
+        if (maps[idx][3] != 0xff || (idle_test ? !active : (maps[idx][2] < 192 || maps[idx][2] > 208))) {
+            /* Wait for the session, and for the Android gradient in the normal tests. */
             usleep(20000);
             continue;
         }
-        if (fence >= 0)
-            close(fence);
+        struct OutputEvent output;
+        if (!idle_test && poll_output_event(ctx, &output, 0) == 1 &&
+            output.type == OUTPUT_TYPE_CLIPBOARD) {
+            const char expected[] = "Salinan dari Waydroid";
+            char text[sizeof(expected) - 1];
+            if (output.clipboard.size != sizeof(text) ||
+                poll_output_event_extend_data(ctx, text, sizeof(text), 1000) != 1 ||
+                memcmp(text, expected, sizeof(text)) != 0) {
+                fprintf(stderr, "fake-app: unexpected clipboard text\n");
+                return 1;
+            }
+            copied = true;
+        }
         got++;
-        if (got <= 3 || got == frames) {
+        if (got <= 3 || got == frames || (idle_test && got > frames - NBUF)) {
             char path[512];
             snprintf(path, sizeof(path), "%s-%d.ppm", prefix, got);
             save_ppm(path, maps[idx], w, h, stride);
+        }
+        if (idle_test) {
+            usleep(20000);
+            continue;
         }
         if (got == 2) {
             struct InputEvent ev = { .type = INPUT_TYPE_TOUCH };
@@ -191,17 +225,19 @@ int main(int argc, char **argv)
             push_input_event(ctx, &key);
             key.key.action = INPUT_ACTION_UP;
             push_input_event(ctx, &key);
-            /* A variable-length event the bridge must skip without losing sync. */
-            const char text[] = "clipboard text the bridge ignores";
+            /* Clipboard traffic must preserve framing for the following key event. */
+            char text[] = "Tempel dari AnLand: é";
             struct InputEvent clip = { .type = INPUT_TYPE_CLIPBOARD };
-            clip.clipboard.size = sizeof(text);
-            push_input_event_with_length(ctx, &clip, (void *)text, sizeof(text));
+            clip.clipboard.size = sizeof(text) - 1;
+            push_input_event_with_length(ctx, &clip, text, sizeof(text) - 1);
             key.key.action = INPUT_ACTION_DOWN;
             key.key.keycode = 48; /* KEY_B, must still arrive after the clipboard */
             push_input_event(ctx, &key);
         }
     }
-    printf("fake-app: received %d frames\n", got);
+    printf("fake-app: received %d frames, %d with a render fence\n", got, fences);
+    if (copied)
+        puts("fake-app: received the Android clipboard");
     fflush(stdout);
     usleep(300000);
     disconnect(ctx);

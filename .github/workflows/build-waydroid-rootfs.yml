@@ -20,6 +20,11 @@ on:
         options:
           - VANILLA
           - GAPPS
+      gpu:
+        description: "Add the Adreno (Snapdragon) GPU driver. Android then draws with the GPU on Snapdragon phones with Hardware Access, and with the CPU everywhere else"
+        required: true
+        type: boolean
+        default: true
       publish_release:
         description: Publish the result as a GitHub Release
         required: true
@@ -35,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      gpu_matrix: ${{ steps.matrix.outputs.gpu_matrix }}
       build_id: ${{ steps.matrix.outputs.build_id }}
     steps:
       - id: matrix
@@ -42,17 +48,72 @@ jobs:
           ABI: ${{ inputs.abi }}
         run: |
           case "$ABI" in
-            arm64_only) matrix='{"abi":["arm64_only"]}' ;;
-            arm64_32)   matrix='{"abi":["arm64_32"]}' ;;
-            both)       matrix='{"abi":["arm64_only","arm64_32"]}' ;;
+            arm64_only) matrix='{"abi":["arm64_only"]}'; gpu='{"arch":["aarch64"]}' ;;
+            arm64_32)   matrix='{"abi":["arm64_32"]}'; gpu='{"arch":["aarch64","arm"]}' ;;
+            both)       matrix='{"abi":["arm64_only","arm64_32"]}'; gpu='{"arch":["aarch64","arm"]}' ;;
             *) echo "unknown abi: $ABI" >&2; exit 1 ;;
           esac
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "gpu_matrix=$gpu" >> "$GITHUB_OUTPUT"
           echo "build_id=$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+
+  gpu-drivers:
+    name: GPU drivers ${{ matrix.arch }}
+    needs: setup
+    if: ${{ inputs.gpu }}
+    # The Android NDK only runs on x86-64.
+    runs-on: ubuntu-24.04
+    # The 32-bit driver is a bonus for the arm64_32 image; without it that image
+    # simply draws with the CPU, so its failure does not stop the build.
+    continue-on-error: ${{ matrix.arch == 'arm' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.gpu_matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Reuse drivers built from the same sources
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gpu
+          key: waydroid-gpu-${{ matrix.arch }}-${{ hashFiles('waydroid/build-gpu-drivers.sh', 'waydroid/gpu/**', 'waydroid/src/gpu-copy-protocol.h') }}
+
+      - name: Install build tools
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ninja-build bison flex patchelf glslang-tools \
+            python3-mako python3-yaml python3-packaging
+          pipx install 'meson>=1.4,<2'
+          meson --version
+
+      - name: Build Mesa (freedreno + turnip for KGSL), the dma-buf gralloc and the GPU copy helper
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+          echo "NDK: $ndk"
+          ./waydroid/build-gpu-drivers.sh -n "$ndk" -a "$ARCH" \
+            -o "$RUNNER_TEMP/gpu" -w "$RUNNER_TEMP/gpu-work"
+
+      - name: Upload the drivers
+        uses: actions/upload-artifact@v6
+        with:
+          name: waydroid-gpu-${{ matrix.arch }}
+          path: ${{ runner.temp }}/gpu
+          retention-days: 3
 
   build:
     name: Build ${{ matrix.abi }} / ${{ inputs.system_type }}
-    needs: setup
+    needs: [setup, gpu-drivers]
+    # Runs without GPU drivers when that job was skipped (gpu: false).
+    if: ${{ !cancelled() && needs.setup.result == 'success' && (needs.gpu-drivers.result == 'success' || needs.gpu-drivers.result == 'skipped') }}
     runs-on: ubuntu-24.04-arm
     strategy:
       fail-fast: false
@@ -70,6 +131,7 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential meson ninja-build pkg-config git dpkg-dev file \
             libwayland-dev libwayland-bin wayland-protocols libffi-dev \
+            libegl-dev libgles-dev libegl-mesa0 \
             curl aria2 unzip xz-utils python3 \
             alsa-utils libasound2-plugins pulseaudio-utils
 
@@ -82,18 +144,43 @@ jobs:
       - name: Test the display bridge
         run: ./waydroid/tests/run-bridge-test.sh "$RUNNER_TEMP/tools" "$RUNNER_TEMP/tools-work"
 
+      - name: Download the GPU drivers
+        if: ${{ inputs.gpu }}
+        uses: actions/download-artifact@v7
+        with:
+          pattern: waydroid-gpu-*
+          path: ${{ runner.temp }}/gpu
+
       - name: Build the rootfs
         env:
           ABI: ${{ matrix.abi }}
           SYSTEM_TYPE: ${{ inputs.system_type }}
+          GPU: ${{ inputs.gpu }}
         run: |
           set -euo pipefail
+          gpu_args=()
           case "$ABI" in
-            arm64_only) ota_arch=waydroid_arm64_only ;;
-            arm64_32)   ota_arch=waydroid_arm64 ;;
+            arm64_only) ota_arch=waydroid_arm64_only; gpu_arches="aarch64" ;;
+            arm64_32)   ota_arch=waydroid_arm64; gpu_arches="aarch64 arm" ;;
           esac
+          if [[ "$GPU" == true ]]; then
+            for arch in $gpu_arches; do
+              dir="$RUNNER_TEMP/gpu/waydroid-gpu-$arch"
+              # A single downloaded artifact may land without its own folder.
+              [[ -d "$dir" ]] || dir="$RUNNER_TEMP/gpu"
+              if [[ ! -f "$dir/gpu-release-$arch.txt" ]]; then
+                if [[ "$arch" == arm ]]; then
+                  echo "::warning::No 32-bit GPU driver; the $ABI image draws with the CPU."
+                  continue
+                fi
+                echo "GPU drivers for $arch are missing" >&2
+                exit 1
+              fi
+              gpu_args+=(-G "$dir")
+            done
+          fi
           sudo ./waydroid/build-waydroid-rootfs.sh \
-            -a "$ota_arch" -t "$SYSTEM_TYPE" \
+            -a "$ota_arch" -t "$SYSTEM_TYPE" "${gpu_args[@]}" \
             -T "$RUNNER_TEMP/tools" -o "$RUNNER_TEMP/out"
           sudo rm -rf "$RUNNER_TEMP/out/work"
           cp "$RUNNER_TEMP"/out/*.tar.xz "$RUNNER_TEMP"/out/*.sha256 .
@@ -112,7 +199,7 @@ jobs:
   release:
     name: Publish Release
     needs: [setup, build]
-    if: ${{ inputs.publish_release }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && inputs.publish_release }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -128,11 +215,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: waydroid-rootfs-${{ needs.setup.outputs.build_id }}
           SYSTEM_TYPE: ${{ inputs.system_type }}
+          GPU: ${{ inputs.gpu }}
         run: |
           set -euo pipefail
           {
             echo "Waydroid's Android image packaged as a Droidspaces rootfs, shown through the Anland app."
             echo
+            if [[ "$GPU" == true ]]; then
+              echo "- **Snapdragon GPU:** on Snapdragon phones, turn on **Hardware Access** for the container and Android draws with the Adreno GPU at full resolution. Other phones fall back to CPU drawing."
+            else
+              echo "- Built without the GPU driver: Android always draws with the CPU."
+            fi
             echo "- Import the \`.tar.xz\` in Droidspaces as a **sparse image** of 8 GB or more."
             echo "- Enable **Anland Display** and privileged mode for the container."
             echo "- \`arm64_only\` runs on every ARM64 phone. \`arm64_32\` also runs 32-bit apps but only starts on processors that still support 32-bit code."

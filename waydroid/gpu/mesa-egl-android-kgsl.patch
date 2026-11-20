@@ -1,0 +1,30 @@
+diff --git a/src/egl/drivers/dri2/platform_android.c b/src/egl/drivers/dri2/platform_android.c
+index 7db9f6b..b5d901f 100644
+--- a/src/egl/drivers/dri2/platform_android.c
++++ b/src/egl/drivers/dri2/platform_android.c
+@@ -1111,6 +1111,25 @@ droid_open_device(_EGLDisplay *disp, bool swrast)
+    const unsigned node_type = swrast ? DRM_NODE_PRIMARY : DRM_NODE_RENDER;
+ #endif
+ 
++#ifdef HAVE_FREEDRENO_KGSL
++   /* Qualcomm phone kernels drive the Adreno GPU through /dev/kgsl-3d0 and
++    * have no DRM node. MESA_LOADER_DRIVER_OVERRIDE=kgsl (Android property
++    * mesa.loader.driver.override=kgsl) makes the freedreno driver use it. */
++   if (disp->Options.Kgsl) {
++      dri2_dpy->fd_render_gpu = loader_open_device("/dev/kgsl-3d0");
++      if (dri2_dpy->fd_render_gpu < 0) {
++         _eglLog(_EGL_WARNING, "%s() cannot open /dev/kgsl-3d0", __func__);
++         return EGL_FALSE;
++      }
++      if (!droid_probe_device(disp, false)) {
++         close(dri2_dpy->fd_render_gpu);
++         dri2_dpy->fd_render_gpu = -1;
++         return EGL_FALSE;
++      }
++      return EGL_TRUE;
++   }
++#endif
++
+    if (property_get("drm.gpu.vendor_name", vendor_buf, NULL) > 0)
+       vendor_name = vendor_buf;
+ 

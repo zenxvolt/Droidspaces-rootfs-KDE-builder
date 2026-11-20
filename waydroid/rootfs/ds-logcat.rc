@@ -1,0 +1,12 @@
+# Keeps Android's log in a file inside the rootfs, so it can be read from the
+# phone without entering the container: <rootfs>/data/ds-waydroid-logcat.txt
+# (plus .1 for the part before). Installed by the Droidspaces Waydroid rootfs
+# builder.
+service ds-logcat /system/bin/logcat -b main,system,crash -v threadtime -f /data/ds-waydroid-logcat.txt -r 4096 -n 1
+    class main
+    user root
+    group root log
+    disabled
+
+on post-fs-data
+    start ds-logcat

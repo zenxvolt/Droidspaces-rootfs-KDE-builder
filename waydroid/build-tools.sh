@@ -44,8 +44,11 @@ for tool in "$CC" "$AR" meson ninja pkg-config wayland-scanner git; do
   command -v "$tool" >/dev/null || die "missing build tool: $tool"
 done
 
-XDG_SHELL_XML="$(pkg-config --variable=pkgdatadir wayland-protocols 2>/dev/null || true)/stable/xdg-shell/xdg-shell.xml"
+PROTOCOLS_DIR="$(pkg-config --variable=pkgdatadir wayland-protocols 2>/dev/null || true)"
+XDG_SHELL_XML="$PROTOCOLS_DIR/stable/xdg-shell/xdg-shell.xml"
+DMABUF_XML="$PROTOCOLS_DIR/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml"
 [[ -f "$XDG_SHELL_XML" ]] || die "wayland-protocols is not installed (xdg-shell.xml not found)"
+[[ -f "$DMABUF_XML" ]] || die "wayland-protocols has no linux-dmabuf-unstable-v1.xml"
 
 mkdir -p "$OUT_DIR" "$WORK_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
@@ -132,6 +135,8 @@ GEN_DIR="$WORK_DIR/gen"
 mkdir -p "$GEN_DIR"
 wayland-scanner server-header "$XDG_SHELL_XML" "$GEN_DIR/xdg-shell-server-protocol.h"
 wayland-scanner private-code "$XDG_SHELL_XML" "$GEN_DIR/xdg-shell-protocol.c"
+wayland-scanner server-header "$DMABUF_XML" "$GEN_DIR/linux-dmabuf-unstable-v1-server-protocol.h"
+wayland-scanner private-code "$DMABUF_XML" "$GEN_DIR/linux-dmabuf-unstable-v1-protocol.c"
 
 # --- the two programs ------------------------------------------------------
 CFLAGS_COMMON=(-O2 -Wall -Wextra -Wno-format-truncation -static)
@@ -139,19 +144,24 @@ CFLAGS_COMMON=(-O2 -Wall -Wextra -Wno-format-truncation -static)
 log "Building ds-waydroid-init"
 "$CC" "${CFLAGS_COMMON[@]}" -o "$OUT_DIR/ds-waydroid-init" "$SCRIPT_DIR/src/ds-waydroid-init.c"
 
+log "Building ds-net-probe"
+"$CC" "${CFLAGS_COMMON[@]}" -o "$OUT_DIR/ds-net-probe" "$SCRIPT_DIR/src/ds-net-probe.c"
+
 log "Building anland-waydroid-bridge"
 "$CC" "${CFLAGS_COMMON[@]}" -O3 \
   -I"$GEN_DIR" -I"$PREFIX/include" \
-  -I"$ANLAND_SRC/libdisplay_producer" -I"$ANLAND_SRC/common" \
+  -I"$SCRIPT_DIR/src" -I"$ANLAND_SRC/libdisplay_producer" -I"$ANLAND_SRC/common" \
   -o "$OUT_DIR/anland-waydroid-bridge" \
   "$SCRIPT_DIR/src/anland-waydroid-bridge.c" \
+  "$SCRIPT_DIR/src/anland-clipboard.c" \
   "$SCRIPT_DIR/src/pulse-server.c" \
   "$GEN_DIR/xdg-shell-protocol.c" \
+  "$GEN_DIR/linux-dmabuf-unstable-v1-protocol.c" \
   "$ANLAND_SRC/libdisplay_producer/display_producer.c" \
   "$ANLAND_SRC/common/socket_utils.c" \
   -L"$PREFIX/lib" ${FFI_LIB_DIR:+-L"$FFI_LIB_DIR"} -lwayland-server -lffi -lm -lrt -lpthread
 
-"$STRIP" "$OUT_DIR/ds-waydroid-init" "$OUT_DIR/anland-waydroid-bridge"
+"$STRIP" "$OUT_DIR/ds-waydroid-init" "$OUT_DIR/anland-waydroid-bridge" "$OUT_DIR/ds-net-probe"
 printf '%s\n' "$ANLAND_REVISION" > "$OUT_DIR/anland-revision.txt"
 
 log "Done"

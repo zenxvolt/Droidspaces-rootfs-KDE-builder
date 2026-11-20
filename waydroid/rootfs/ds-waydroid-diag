@@ -40,6 +40,21 @@ run() { echo "\$ $*"; "$@" 2>&1; }
   run ping -c 2 -W 3 1.1.1.1
   run ping -c 2 -W 3 connectivitycheck.gstatic.com
 
+  # Apps reach the network as their own user and with netd's mark for the
+  # default network; root uses neither. Trying each combination separately
+  # shows which one breaks app traffic: the mark (routing inside Android) or
+  # the user (filtering by UID, for example by the phone's own Android).
+  section "Network: TCP like an app (ds-net-probe)"
+  MARK="$(ip rule 2>/dev/null | sed -n 's/.*fwmark \(0x[0-9a-f]*\)\/0xffff.* lookup eth0.*/\1/p' | head -n1)"
+  echo "netd mark of the eth0 network: ${MARK:-not found}"
+  for target in 1.1.1.1 8.8.8.8; do
+    echo "$target:443 as root:              $(ds-net-probe $target 443)"
+    [ -n "$MARK" ] && echo "$target:443 as root, marked:      $(ds-net-probe $target 443 0 "$MARK")"
+    echo "$target:443 as app uid 10100:     $(ds-net-probe $target 443 10100)"
+    [ -n "$MARK" ] && echo "$target:443 as app uid 10100, marked: $(ds-net-probe $target 443 10100 "$MARK")"
+    echo "$target:443 as system uid 1000:   $(ds-net-probe $target 443 1000)"
+  done
+
   section "Sound"
   run getprop waydroid.pulse_runtime_path
   run ls -l /run/xdg/pulse/

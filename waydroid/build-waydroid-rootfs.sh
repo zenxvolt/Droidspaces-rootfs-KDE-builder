@@ -9,6 +9,7 @@
 #   + /sbin/init                          (ds-waydroid-init, prepares the container)
 #   + /system/bin/anland-waydroid-bridge  (display bridge to Anland)
 #   + /system/etc/droidspaces-waydroid.conf
+#   + Adreno GPU drivers in /vendor          (with -G, from build-gpu-drivers.sh)
 #   + /system/bin/ds-waydroid-diag        (network and sound report for bug reports)
 #
 # Must run as root on Linux (it loop-mounts the Android images).
@@ -21,6 +22,8 @@
 #   -S FILE     use this system image (.zip or .img) instead of downloading
 #   -V FILE     use this vendor image (.zip or .img) instead of downloading
 #   -T DIR      directory with the prebuilt tools (default: build them)
+#   -G DIR      add the Adreno GPU drivers from DIR (one or more output
+#               directories of build-gpu-drivers.sh, merged; DIR/vendor/...)
 #   -o DIR      output directory (default: ./out)
 #   -c LEVEL    xz compression level 0-9 (default 6)
 #   -k          keep the unpacked rootfs directory
@@ -33,6 +36,7 @@ VENDOR_TYPE="MAINLINE"
 SYSTEM_FILE=""
 VENDOR_FILE=""
 TOOLS_DIR=""
+GPU_DIRS=()
 OUT_DIR="$SCRIPT_DIR/out"
 XZ_LEVEL=6
 KEEP_ROOTFS=false
@@ -40,17 +44,18 @@ KEEP_ROOTFS=false
 : "${WAYDROID_OTA_URL:=https://ota.waydro.id}"
 : "${WAYDROID_OTA_FALLBACK_URL:=https://raw.githubusercontent.com/waydroid/OTA/master}"
 
-while getopts "t:a:S:V:T:o:c:kh" opt; do
+while getopts "t:a:S:V:T:G:o:c:kh" opt; do
   case "$opt" in
     t) SYSTEM_TYPE="$OPTARG" ;;
     a) OTA_ARCH="$OPTARG" ;;
     S) SYSTEM_FILE="$OPTARG" ;;
     V) VENDOR_FILE="$OPTARG" ;;
     T) TOOLS_DIR="$OPTARG" ;;
+    G) GPU_DIRS+=("$OPTARG") ;;
     o) OUT_DIR="$OPTARG" ;;
     c) XZ_LEVEL="$OPTARG" ;;
     k) KEEP_ROOTFS=true ;;
-    *) sed -n '2,26p' "$0"; exit 1 ;;
+    *) sed -n '2,29p' "$0"; exit 1 ;;
   esac
 done
 
@@ -172,7 +177,7 @@ if [[ -z "$TOOLS_DIR" ]]; then
   "$SCRIPT_DIR/build-tools.sh" -o "$WORK/tools" -w "$WORK/tools-work"
   TOOLS_DIR="$WORK/tools"
 fi
-for tool in ds-waydroid-init anland-waydroid-bridge; do
+for tool in ds-waydroid-init anland-waydroid-bridge ds-net-probe; do
   [[ -x "$TOOLS_DIR/$tool" ]] || die "missing helper program: $TOOLS_DIR/$tool"
   file -b "$TOOLS_DIR/$tool" 2>/dev/null | grep -q "aarch64" \
     || echo "warning: $tool is not an ARM64 program; this rootfs will only run on its own architecture" >&2
@@ -249,14 +254,61 @@ chmod 0644 "$ROOTFS/system/etc/droidspaces"
 install -d -m 0755 -o 0 -g 0 "$ROOTFS/sbin"
 install -m 0755 -o 0 -g 0 "$TOOLS_DIR/ds-waydroid-init" "$ROOTFS/sbin/init"
 install -m 0755 -o 0 -g 2000 "$TOOLS_DIR/anland-waydroid-bridge" "$ROOTFS/system/bin/anland-waydroid-bridge"
+install -m 0755 -o 0 -g 2000 "$SCRIPT_DIR/rootfs/ds-waydroid-benchmark" "$ROOTFS/system/bin/ds-waydroid-benchmark"
 install -m 0755 -o 0 -g 2000 "$SCRIPT_DIR/rootfs/ds-waydroid-diag" "$ROOTFS/system/bin/ds-waydroid-diag"
+install -m 0755 -o 0 -g 2000 "$TOOLS_DIR/ds-net-probe" "$ROOTFS/system/bin/ds-net-probe"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/anland-bridge.rc" "$ROOTFS/system/etc/init/anland-bridge.rc"
+install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/ds-logcat.rc" "$ROOTFS/system/etc/init/ds-logcat.rc"
+install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/ds-gpu-guard.rc" "$ROOTFS/system/etc/init/ds-gpu-guard.rc"
+install -m 0755 -o 0 -g 0 "$SCRIPT_DIR/rootfs/ds-gpu-guard.sh" "$ROOTFS/system/etc/ds-gpu-guard.sh"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/droidspaces-waydroid.conf" "$ROOTFS/system/etc/droidspaces-waydroid.conf"
+
+# LineageOS registers a physical button shortcut for bugreport. Android init
+# then opens every entry in /dev/input in blocking mode. Waydroid provides
+# FIFOs here, so init can hang waiting for a writer before it starts Android.
+LINEAGE_INIT="$ROOTFS/system/system_ext/etc/init/init.lineage-system_ext.rc"
+if [[ -f "$LINEAGE_INIT" ]]; then
+  sed -i -E '/^[[:space:]]*keycodes[[:space:]]+114[[:space:]]+115[[:space:]]+116[[:space:]]*$/d' "$LINEAGE_INIT"
+fi
+
+# A declared but unavailable OMX HAL makes Android wait indefinitely while
+# enumerating codecs. Mainline Waydroid ships software Codec2.
+python3 "$SCRIPT_DIR/remove-unused-omx.py" "$ROOTFS"
+
+# Adreno GPU drivers. They replace Waydroid's gralloc.gbm.so (which needs a
+# DRM device phones do not have) and add the *_kgsl EGL/GLES libraries.
+# /sbin/init only switches Android to them when the phone has /dev/kgsl-3d0.
+GPU_RELEASE="$WORK/gpu-release.txt"
+: > "$GPU_RELEASE"
+for gpu_dir in "${GPU_DIRS[@]}"; do
+  [[ -d "$gpu_dir/vendor" ]] || die "-G $gpu_dir has no vendor/ directory (run build-gpu-drivers.sh)"
+  log "Installing the Adreno GPU drivers from $gpu_dir"
+  (cd "$gpu_dir/vendor" && find . -type f) | while read -r file; do
+    file="${file#./}"
+    case "$file" in
+      bin/*) install -D -m 0755 -o 0 -g 2000 "$gpu_dir/vendor/$file" "$ROOTFS/vendor/$file" ;;
+      *)     install -D -m 0644 -o 0 -g 0 "$gpu_dir/vendor/$file" "$ROOTFS/vendor/$file" ;;
+    esac
+    echo "  /vendor/$file"
+  done
+  for info in "$gpu_dir"/gpu-release-*.txt; do
+    if [[ -f "$info" ]]; then sed 's/^/gpu_/' "$info" >> "$GPU_RELEASE"; fi
+  done
+done
+if [[ ${#GPU_DIRS[@]} -gt 0 ]]; then
+  [[ -f "$ROOTFS/vendor/lib64/egl/libEGL_kgsl.so" ]] \
+    || die "the GPU drivers have no 64-bit EGL library"
+  if [[ -e "$ROOTFS/system/bin/linker" && ! -f "$ROOTFS/vendor/lib/egl/libEGL_kgsl.so" ]]; then
+    echo "warning: this image runs 32-bit apps but no 32-bit GPU driver was given;" \
+         "Android will draw with the CPU" >&2
+  fi
+fi
 
 ANDROID_RELEASE="$(sed -n 's/^ro.build.version.release=//p' "$ROOTFS/system/build.prop" | head -n1)"
 LINEAGE_VERSION="$(sed -n 's/^ro.lineage.build.version=//p' "$ROOTFS/system/build.prop" | head -n1)"
 BUILD_DATE="$(date -u +%Y%m%d)"
 ANLAND_REV="$(cat "$TOOLS_DIR/anland-revision.txt" 2>/dev/null || echo unknown)"
+BUILDER_REV="$(git -C "$SCRIPT_DIR" rev-parse --verify HEAD 2>/dev/null || echo unknown)"
 
 # Lets Droidspaces show a sensible name for the container.
 cat > "$ROOTFS/system/etc/os-release" <<EOF
@@ -271,7 +323,10 @@ built=$BUILD_DATE
 system_image=$SYSTEM_NAME
 vendor_image=$VENDOR_NAME
 anland_revision=$ANLAND_REV
+builder_revision=$BUILDER_REV
+gpu_drivers=$([[ ${#GPU_DIRS[@]} -gt 0 ]] && echo adreno-kgsl || echo none)
 EOF
+cat "$GPU_RELEASE" >> "$ROOTFS/system/etc/droidspaces-waydroid-release"
 chmod 0644 "$ROOTFS/system/etc/os-release" "$ROOTFS/system/etc/droidspaces-waydroid-release"
 
 # The same rule the Droidspaces app applies before it installs an archive.

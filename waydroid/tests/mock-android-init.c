@@ -17,6 +17,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static FILE *out;
@@ -43,7 +44,7 @@ static void cat(const char *label, const char *path)
 
 int main(int argc, char **argv)
 {
-    out = fopen("/mock-android-init.log", argc > 1 ? "a" : "w");
+    out = fopen("/mock-android-init.log", argc > 1 ? "ae" : "we");
     if (!out)
         out = stderr;
     setvbuf(out, NULL, _IOLBF, 0);
@@ -75,6 +76,25 @@ int main(int argc, char **argv)
     }
 
     fprintf(out, "second-stage pid=%d arg=%s\n", (int)getpid(), argv[1]);
+    DIR *fds = opendir("/proc/self/fd");
+    if (fds) {
+        int inherited = 0;
+        struct dirent *entry;
+        while ((entry = readdir(fds))) {
+            int fd = atoi(entry->d_name);
+            if (fd > STDERR_FILENO && fd != dirfd(fds) && fd != fileno(out)) {
+                char path[64], target[256];
+                snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+                ssize_t len = readlink(path, target, sizeof(target) - 1);
+                if (len >= 0)
+                    target[len] = '\0';
+                fprintf(out, "inherited fd %d: %s\n", fd, len >= 0 ? target : "<unknown>");
+                inherited++;
+            }
+        }
+        closedir(fds);
+        fprintf(out, "extra inherited descriptors: %d\n", inherited);
+    }
     fprintf(out, "env PATH=%s\n", getenv("PATH") ? getenv("PATH") : "<unset>");
     fprintf(out, "env FIRST_STAGE_STARTED_AT=%s\n",
             getenv("FIRST_STAGE_STARTED_AT") ? "set" : "<unset>");
@@ -83,7 +103,7 @@ int main(int argc, char **argv)
     static const char *const nodes[] = {
         "/dev/null", "/dev/zero", "/dev/kmsg", "/dev/random", "/dev/urandom", "/dev/ptmx",
         "/dev/pts/ptmx", "/dev/console", "/dev/binder", "/dev/hwbinder", "/dev/vndbinder",
-        "/dev/socket", "/run/xdg", "/run/display.sock", "/vendor/waydroid.prop", NULL
+        "/dev/socket", "/dev/ashmem", "/run/xdg", "/run/display.sock", "/vendor/waydroid.prop", NULL
     };
     for (int i = 0; nodes[i]; i++) {
         struct stat st;
@@ -98,6 +118,19 @@ int main(int argc, char **argv)
     fprintf(out, "open /dev/null for writing: %s\n", fd >= 0 ? "ok" : strerror(errno));
     if (fd >= 0)
         close(fd);
+
+    /* Match Waydroid's non-root producer and its real input FIFO path. */
+    pid_t input_probe = fork();
+    if (input_probe == 0) {
+        const char *fifo = "/dev/input/wl_touch_events";
+        if (setgid(1000) < 0 || setuid(1000) < 0 || mkfifo(fifo, 0660) < 0)
+            _exit(1);
+        _exit(unlink(fifo) < 0);
+    }
+    int input_status;
+    int input_ok = input_probe > 0 && waitpid(input_probe, &input_status, 0) == input_probe &&
+                   WIFEXITED(input_status) && WEXITSTATUS(input_status) == 0;
+    fprintf(out, "Android system user can create a touch FIFO: %s\n", input_ok ? "yes" : "no");
 
     fprintf(out, "dev listing:");
     DIR *d = opendir("/dev");

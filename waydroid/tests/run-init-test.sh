@@ -74,14 +74,21 @@ common_checks() {
   local BOOT="$R/ds-waydroid-boot.log" MOCK="$R/mock-android-init.log"
   check "our init ran as PID 1 and handed over to Android" has "starting Android" "$BOOT"
   check "Android stays PID 1" has "second-stage pid=1" "$MOCK"
+  check "Android does not inherit the starter's file descriptors" has "^extra inherited descriptors: 0$" "$MOCK"
   check "no first-stage call failed" hasnt "first-stage FAIL" "$MOCK"
   check "the host kernel command line is hidden" has "^cmdline: ds_waydroid=1" "$MOCK"
   check "/dev has the nodes Android needs" bash -c "! grep -E 'node /dev/(null|zero|kmsg|random|urandom|ptmx|pts/ptmx|console|socket) +MISSING' '$MOCK'"
   check "/dev is writable for Android" has "open /dev/null for writing: ok" "$MOCK"
+  check "the Waydroid composer can create its touch FIFO" has "^Android system user can create a touch FIFO: yes$" "$MOCK"
   check "the Wayland socket directory exists" has "node /run/xdg  *directory" "$MOCK"
   check "properties were generated from the config" has "^prop ro.hardware.gralloc=default" "$MOCK"
+  check "the CPU density is set before Android init" has "^prop ro.sf.lcd_density=216$" "$MOCK"
   check "bridge settings are not leaked into properties" hasnt "^prop bridge\." "$MOCK"
-  check "memfd is enabled when ashmem is absent" has "^prop sys.use_memfd=true" "$MOCK"
+  check "gpu settings are not leaked into properties" hasnt "^prop gpu\." "$MOCK"
+  check "without the GPU driver files Android draws with the CPU" has "^prop ro.hardware.egl=swiftshader$" "$MOCK"
+  check "the dma-buf gralloc is only requested in GPU mode" hasnt "^prop gralloc.gbm.legacy=" "$MOCK"
+  check "the GPU decision is explained in the boot log" has "^gpu: " "$BOOT"
+  check "memfd is enabled by default" has "^prop sys.use_memfd=true$" "$MOCK"
   check "Android cannot change the host's kernel settings" has "^can change kernel settings (/proc/sys): no" "$MOCK"
   check "Android can change its own network settings (needed to bring eth0 up)" has "^can change network settings (/proc/sys/net): YES" "$MOCK"
   check "Android cannot trigger sysrq (kernel crash, reboot)" has "^can trigger sysrq: no" "$MOCK"
@@ -111,6 +118,19 @@ for mode in "" "--hw-access" "--privileged=full"; do
   common_checks
   check "Android's own first stage is used" has "first-stage result: passed" "$R/mock-android-init.log"
 done
+
+echo "== hardware access exposes an unusable ashmem node"
+mknod -m 000 "$T/unavailable-ashmem" c 1 3
+fresh_config
+boot --hw-access --bind="$T/unavailable-ashmem:/dev/ashmem"
+check "ashmem is visible to Android" has "^node /dev/ashmem  *char device$" "$R/mock-android-init.log"
+check "Android still uses memfd by default" has "^prop sys.use_memfd=true$" "$R/mock-android-init.log"
+
+echo "== explicit sys.use_memfd override"
+fresh_config "sys.use_memfd=false"
+boot
+check "an explicit override is kept" has "^prop sys.use_memfd=false$" "$R/mock-android-init.log"
+check "the default does not override it" hasnt "^prop sys.use_memfd=true$" "$R/mock-android-init.log"
 
 echo "== first stage emulated (init.stage=second)"
 fresh_config "init.stage=second"

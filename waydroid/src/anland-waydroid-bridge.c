@@ -8,12 +8,19 @@
  *   Android (SurfaceFlinger) -> hwcomposer.waydroid -> [this bridge] -> Anland
  *
  * It accepts exactly what the Waydroid HWC needs in its simplest mode
- * (wl_compositor, wl_shm, xdg_wm_base, wl_seat, wl_output), copies every
- * committed frame into the buffer the Anland app selected, and turns Anland
- * touch / key events back into wl_touch / wl_keyboard events.
+ * (wl_compositor, wl_shm, zwp_linux_dmabuf_v1, xdg_wm_base, wl_seat,
+ * wl_output), copies every committed frame into the buffer the Anland app
+ * selected, and turns Anland touch / key events back into wl_touch /
+ * wl_keyboard events.
  *
- * Rendering is a CPU copy on purpose: it needs no GL driver, so the binary can
- * be fully static and run inside the Android rootfs before anything else is up.
+ * Frames arrive as shared memory when Android draws with the CPU, or as
+ * dma-bufs from the dma-buf heap when Android draws with the Adreno GPU (see
+ * waydroid/gpu/). The bridge itself copies with the CPU: it needs no GL
+ * driver, so the binary can be fully static and run inside the Android rootfs
+ * before anything else is up. For GPU frames it starts anland-gpu-copy, a
+ * small helper linked to Android's EGL, and lets the GPU do the copy instead
+ * (waydroid/src/gpu-copy-protocol.h); without the helper it falls back to the
+ * CPU.
  *
  * It also answers as the PulseAudio server Waydroid's audio HAL connects to
  * (pulse-server.c) and sends the mixed sound over Anland's audio channel, so
@@ -26,6 +33,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -36,10 +44,12 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -47,13 +57,18 @@
 #include <wayland-server-protocol.h>
 
 #include "xdg-shell-server-protocol.h"
+#include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "display_producer.h"
+#include "anland-clipboard.h"
+#include "display-geometry.h"
+#include "gpu-copy-protocol.h"
 #include "pulse-server.h"
 
 /* ------------------------------------------------------------------------- */
 /* Small helpers                                                             */
 /* ------------------------------------------------------------------------- */
 
+#define DMA_BUF_SYNC_READ  (1 << 0)
 #define DMA_BUF_SYNC_WRITE (2 << 0)
 #define DMA_BUF_SYNC_START (0 << 2)
 #define DMA_BUF_SYNC_END   (1 << 2)
@@ -64,6 +79,24 @@ struct bridge_dma_buf_sync { uint64_t flags; };
 #define AHB_FORMAT_RGBA_8888    1
 #define AHB_FORMAT_RGBX_8888    2
 #define AHB_FORMAT_RGBA_1010102 43
+
+#define DEFAULT_GPU_COPY_HELPER "/vendor/bin/anland-gpu-copy"
+
+/* DRM fourcc codes of the 32-bit formats accepted from Android. The wl_shm
+ * codes are the same except for ARGB8888 (0) and XRGB8888 (1). */
+#define FOURCC(a, b, c, d) \
+    ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+#define DRM_FORMAT_ARGB8888 FOURCC('A', 'R', '2', '4')
+#define DRM_FORMAT_XRGB8888 FOURCC('X', 'R', '2', '4')
+#define DRM_FORMAT_ABGR8888 FOURCC('A', 'B', '2', '4')
+#define DRM_FORMAT_XBGR8888 FOURCC('X', 'B', '2', '4')
+#define DRM_FORMAT_RGB565   FOURCC('R', 'G', '1', '6')
+#define DRM_FORMAT_BGR888   FOURCC('B', 'G', '2', '4')
+#define DRM_FORMAT_MOD_LINEAR  0ull
+#define DRM_FORMAT_MOD_INVALID 0x00ffffffffffffffull
+
+/* Written by /sbin/init; tells whether Android draws with the GPU. */
+#define ANDROID_PROP_FILE "/vendor/waydroid.prop"
 
 #define EMULATED_TOUCH_ID 31
 #define BTN_LEFT_CODE 0x110
@@ -93,18 +126,21 @@ void logmsg(const char *level, const char *fmt, ...)
 #define WARN(...) logmsg("W", __VA_ARGS__)
 #define DBG(...)  do { if (g_verbose) logmsg("D", __VA_ARGS__); } while (0)
 
-static uint32_t now_ms(void)
+static uint64_t now_ns(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)(ts.tv_sec * 1000ull + ts.tv_nsec / 1000000);
+    return ts.tv_sec * 1000000000ull + ts.tv_nsec;
 }
 
 static uint64_t now_ms64(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000ull + ts.tv_nsec / 1000000;
+    return now_ns() / 1000000u;
+}
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)now_ms64();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -116,9 +152,13 @@ struct config {
     char runtime_dir[PATH_MAX];
     char display_name[64];
     char log_path[PATH_MAX];
+    char benchmark_path[PATH_MAX];
     int default_width, default_height;
-    int render_scale;        /* percent of the real screen Android renders at */
-    int max_fps;
+    int render_scale;        /* percent of the real screen Android renders at, -1 = auto */
+    int max_fps;             /* -1 = follow the Anland display */
+    int gpu;                 /* -1 = read ANDROID_PROP_FILE, 0 = CPU drawing, 1 = GPU */
+    int gpu_copy;            /* copy GPU frames with the GPU: -1 = when gpu, 0, 1 */
+    char gpu_copy_helper[PATH_MAX];
     int wait_for_display_ms; /* hold the first configure this long for a real size */
     int ui_width_dp;         /* pick the Android density so the short side is this many dp */
     char pulse_socket[PATH_MAX]; /* where Android's audio looks for PulseAudio; "off" = none */
@@ -129,6 +169,8 @@ struct target {
     size_t len;
     int fd;
     struct buf_info info;
+    uint64_t frame_serial;
+    bool has_frame;
 };
 
 struct bridge;
@@ -152,6 +194,7 @@ struct bridge {
     struct config cfg;
     struct wl_display *display;
     struct wl_event_loop *loop;
+    struct anland_clipboard *clipboard;
     struct wl_event_source *tick;
     uint64_t tick_due_ms;
 
@@ -162,7 +205,9 @@ struct bridge {
     int target_count;
     struct wl_event_source *ready_source, *data_source;
     bool target_ready;
-    bool dirty;
+    bool first_frame_presented;
+    uint64_t frame_serial;
+    uint64_t next_present_ns;
     uint64_t next_connect_ms;
     bool logged_no_daemon;
 
@@ -187,14 +232,26 @@ struct bridge {
     float pointer_x, pointer_y;
     bool pointer_down;
 
+    /* GPU copy helper (anland-gpu-copy) */
+    pid_t gc_pid;
+    int gc_sock;
+    bool gc_ready, gc_failed;
+    uint32_t gc_targets;     /* bit per Anland buffer the helper has imported */
+    uint32_t gc_next_id;
+
+    /* Cumulative counts, sampled only while the benchmark requests them. */
+    uint64_t shm_frames, dmabuf_frames, delivered_frames, ack_count;
+    uint64_t cpu_copies, gpu_copies, failed_copies;
+    uint64_t last_delivered_serial, session_serial;
+    uint64_t next_sample_ms, last_stats_ms, last_frames;
+    int kgsl_open; /* 0 = not checked, 1 = accessible, -1 = unavailable */
+
     /* Sound */
     struct pulse_server *pulse;
     struct wl_event_source *audio_source;
     int audio_fd;                  /* Anland audio channel, -1 without a session */
     uint64_t audio_sent, audio_dropped;
 
-    /* Stats */
-    uint64_t frames, last_stats_ms, last_frames;
 };
 
 static void maybe_present(struct bridge *b);
@@ -227,6 +284,25 @@ static inline uint32_t to_rgba1010102(uint32_t s, bool src_bgr_order)
     g = (g << 2) | (g >> 6);
     bl = (bl << 2) | (bl >> 6);
     return r | (g << 10) | (bl << 20) | (3u << 30);
+}
+
+static void sync_target(struct target *t, uint64_t phase)
+{
+    struct bridge_dma_buf_sync sync = { .flags = phase | DMA_BUF_SYNC_WRITE };
+    ioctl(t->fd, BRIDGE_DMA_BUF_IOCTL_SYNC, &sync);
+}
+
+static void clear_target(struct target *t)
+{
+    uint32_t black = t->info.format == AHB_FORMAT_RGBA_1010102 ? 0xc0000000u : 0xff000000u;
+    uint8_t *pixels = (uint8_t *)t->map + t->info.offset;
+    sync_target(t, DMA_BUF_SYNC_START);
+    for (uint32_t y = 0; y < t->info.height; y++) {
+        uint32_t *row = (uint32_t *)(pixels + (size_t)y * t->info.stride);
+        for (uint32_t x = 0; x < t->info.width; x++)
+            row[x] = black;
+    }
+    sync_target(t, DMA_BUF_SYNC_END);
 }
 
 static void convert_row(uint32_t *dst, const uint32_t *src, uint32_t n,
@@ -278,40 +354,35 @@ static void convert_row_scaled(uint32_t *dst, const uint32_t *src, uint32_t n,
     }
 }
 
-/* Returns false when the destination layout is one we cannot write. */
-static bool copy_frame(struct bridge *b, struct wl_shm_buffer *shm, struct target *t)
+/* A frame from Android, whichever way it arrived. */
+struct frame_src {
+    const uint8_t *data;
+    uint32_t width, height, stride;
+    uint32_t format; /* DRM fourcc */
+};
+
+/* Returns false when the source or destination layout is one we cannot use. */
+static bool copy_frame(struct bridge *b, const struct frame_src *f, struct target *t)
 {
-    const uint32_t sw = (uint32_t)wl_shm_buffer_get_width(shm);
-    const uint32_t sh = (uint32_t)wl_shm_buffer_get_height(shm);
-    const uint32_t sstride = (uint32_t)wl_shm_buffer_get_stride(shm);
-    const uint32_t fmt = wl_shm_buffer_get_format(shm);
+    const uint32_t sw = f->width, sh = f->height, sstride = f->stride;
     const uint32_t dw = t->info.width, dh = t->info.height, dstride = t->info.stride;
 
     bool src_bgr_order;
-    switch (fmt) {
-    case WL_SHM_FORMAT_ARGB8888:
-    case WL_SHM_FORMAT_XRGB8888: src_bgr_order = false; break;
-    case WL_SHM_FORMAT_ABGR8888:
-    case WL_SHM_FORMAT_XBGR8888: src_bgr_order = true; break;
+    switch (f->format) {
+    case DRM_FORMAT_ARGB8888:
+    case DRM_FORMAT_XRGB8888: src_bgr_order = false; break;
+    case DRM_FORMAT_ABGR8888:
+    case DRM_FORMAT_XBGR8888: src_bgr_order = true; break;
     default: return false;
     }
 
-    bool dst_10bit;
-    switch (t->info.format) {
-    case AHB_FORMAT_RGBA_8888:
-    case AHB_FORMAT_RGBX_8888: dst_10bit = false; break;
-    case AHB_FORMAT_RGBA_1010102: dst_10bit = true; break;
-    default: return false;
-    }
-
-    if (!sw || !sh || !dw || !dh || sstride < sw * 4 || dstride < dw * 4)
+    bool dst_10bit = t->info.format == AHB_FORMAT_RGBA_1010102;
+    if (!f->data || !sw || !sh || sstride / 4 < sw)
         return false;
 
-    struct bridge_dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE };
-    ioctl(t->fd, BRIDGE_DMA_BUF_IOCTL_SYNC, &sync);
+    sync_target(t, DMA_BUF_SYNC_START);
 
-    wl_shm_buffer_begin_access(shm);
-    const uint8_t *src = wl_shm_buffer_get_data(shm);
+    const uint8_t *src = f->data;
     uint8_t *dst = (uint8_t *)t->map + t->info.offset;
 
     if (sw == dw && sh == dh) {
@@ -354,31 +425,632 @@ static bool copy_frame(struct bridge *b, struct wl_shm_buffer *shm, struct targe
             }
         }
     }
-    wl_shm_buffer_end_access(shm);
-
-    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
-    ioctl(t->fd, BRIDGE_DMA_BUF_IOCTL_SYNC, &sync);
+    sync_target(t, DMA_BUF_SYNC_END);
     return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* linux-dmabuf buffers (Android drawing with the GPU)                       */
+/* ------------------------------------------------------------------------- */
+
+/* Waydroid's composer hands over the GPU's buffers as single-plane linear
+ * dma-bufs allocated from the phone's dma-buf heap. They are mapped once and
+ * read with the CPU, bracketed by DMA_BUF_IOCTL_SYNC so the CPU caches see
+ * what the GPU wrote. */
+struct dmabuf_buffer {
+    struct bridge *bridge;
+    struct wl_resource *resource;
+    uint32_t gc_id;          /* id at the GPU copy helper, 0 = not imported */
+    int fd;
+    uint32_t offset, stride, width, height, format;
+    uint64_t modifier;
+    void *map;
+    size_t map_len;
+    bool map_failed;
+};
+
+struct dmabuf_params {
+    struct bridge *bridge;
+    struct wl_resource *resource;
+    int fd;
+    uint32_t offset, stride;
+    uint64_t modifier;
+    bool used;
+};
+
+/* Waydroid's composer asks for these for Android's RGBA/RGBX/BGRA_8888,
+ * RGB_565 and RGB_888 buffers. An unsupported format would make it abort. */
+static const uint32_t dmabuf_formats[] = {
+    DRM_FORMAT_ABGR8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888,
+    DRM_FORMAT_RGB565, DRM_FORMAT_BGR888,
+};
+
+static uint32_t dmabuf_bytes_per_pixel(uint32_t format)
+{
+    switch (format) {
+    case DRM_FORMAT_RGB565: return 2;
+    case DRM_FORMAT_BGR888: return 3;
+    default:                return 4;
+    }
+}
+
+/* 16 and 24 bit frames are first widened to ABGR8888 in this scratch buffer,
+ * so the copy and scaling code only ever sees 32 bit pixels. They are rare:
+ * Android draws its windows in 32 bit. */
+static uint32_t *g_widen;
+static size_t g_widen_len;
+
+static const uint8_t *widen_to_abgr(const uint8_t *src, uint32_t w, uint32_t h,
+                                    uint32_t stride, uint32_t format)
+{
+    size_t need = (size_t)w * h;
+    if (need > g_widen_len) {
+        uint32_t *p = realloc(g_widen, need * sizeof(uint32_t));
+        if (!p)
+            return NULL;
+        g_widen = p;
+        g_widen_len = need;
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *row = src + (size_t)y * stride;
+        uint32_t *out = g_widen + (size_t)y * w;
+        if (format == DRM_FORMAT_RGB565) {
+            const uint16_t *px = (const uint16_t *)row;
+            for (uint32_t x = 0; x < w; x++) {
+                uint32_t v = px[x];
+                uint32_t r = (v >> 11) & 0x1f, g = (v >> 5) & 0x3f, b = v & 0x1f;
+                r = (r << 3) | (r >> 2);
+                g = (g << 2) | (g >> 4);
+                b = (b << 3) | (b >> 2);
+                out[x] = r | (g << 8) | (b << 16) | 0xff000000u;
+            }
+        } else { /* BGR888: bytes R, G, B */
+            for (uint32_t x = 0; x < w; x++)
+                out[x] = row[3 * x] | (row[3 * x + 1] << 8) | (row[3 * x + 2] << 16) | 0xff000000u;
+        }
+    }
+    return (const uint8_t *)g_widen;
+}
+
+static bool dmabuf_format_supported(uint32_t format)
+{
+    for (size_t i = 0; i < sizeof(dmabuf_formats) / sizeof(dmabuf_formats[0]); i++)
+        if (dmabuf_formats[i] == format)
+            return true;
+    return false;
+}
+
+static void dmabuf_sync(int fd, uint64_t flags)
+{
+    struct bridge_dma_buf_sync sync = { .flags = flags };
+    /* Not every fd type knows this request (a memfd in the tests); that is fine. */
+    while (ioctl(fd, BRIDGE_DMA_BUF_IOCTL_SYNC, &sync) < 0 && (errno == EINTR || errno == EAGAIN))
+        ;
+}
+
+static void dmabuf_buffer_destroy_request(struct wl_client *c, struct wl_resource *r)
+{
+    (void)c;
+    wl_resource_destroy(r);
+}
+
+static const struct wl_buffer_interface dmabuf_buffer_impl = {
+    .destroy = dmabuf_buffer_destroy_request,
+};
+
+static void gc_forget_source(struct bridge *b, uint32_t id);
+
+static void dmabuf_buffer_resource_destroy(struct wl_resource *r)
+{
+    struct dmabuf_buffer *d = wl_resource_get_user_data(r);
+    if (d->gc_id)
+        gc_forget_source(d->bridge, d->gc_id);
+    if (d->map)
+        munmap(d->map, d->map_len);
+    close(d->fd);
+    free(d);
+}
+
+static struct dmabuf_buffer *dmabuf_buffer_get(struct wl_resource *buffer)
+{
+    if (!buffer || !wl_resource_instance_of(buffer, &wl_buffer_interface, &dmabuf_buffer_impl))
+        return NULL;
+    return wl_resource_get_user_data(buffer);
+}
+
+static const uint8_t *dmabuf_buffer_pixels(struct dmabuf_buffer *d)
+{
+    if (!d->map && !d->map_failed) {
+        size_t len = (size_t)d->offset + (size_t)d->stride * d->height;
+        void *map = mmap(NULL, len, PROT_READ, MAP_SHARED, d->fd, 0);
+        if (map == MAP_FAILED) {
+            WARN("cannot map Android's GPU buffer (%ux%u): %s", d->width, d->height,
+                 strerror(errno));
+            d->map_failed = true;
+        } else {
+            d->map = map;
+            d->map_len = len;
+        }
+    }
+    return d->map ? (const uint8_t *)d->map + d->offset : NULL;
+}
+
+/* ------------------------------------------------------------------------- */
+/* GPU copy helper                                                           */
+/* ------------------------------------------------------------------------- */
+
+static bool gc_wanted(struct bridge *b)
+{
+    return b->cfg.gpu_copy == 1 && !b->gc_failed;
+}
+
+static void gc_stop(struct bridge *b)
+{
+    if (b->gc_sock >= 0)
+        close(b->gc_sock);
+    b->gc_sock = -1;
+    if (b->gc_pid > 0) {
+        kill(b->gc_pid, SIGKILL);
+        waitpid(b->gc_pid, NULL, 0);
+    }
+    b->gc_pid = 0;
+    b->gc_ready = false;
+    b->gc_targets = 0;
+}
+
+/* Gives up on the helper for good: frames are copied with the CPU from now on. */
+static void gc_disable(struct bridge *b, const char *why)
+{
+    WARN("GPU copy turned off (%s); frames are copied with the CPU", why);
+    gc_stop(b);
+    b->gc_failed = true;
+}
+
+/* One request, one reply. send_fd is passed along (not closed); a descriptor in
+ * the reply is stored in *recv_fd (or closed when recv_fd is NULL). */
+static bool gc_call(struct bridge *b, const struct gc_request *rq, int send_fd,
+                    struct gc_reply *rp, int *recv_fd, int timeout_ms)
+{
+    char cbuf[CMSG_SPACE(sizeof(int))];
+    struct iovec iov = { (void *)rq, sizeof(*rq) };
+    struct msghdr mh = { 0 };
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    if (send_fd >= 0) {
+        memset(cbuf, 0, sizeof(cbuf));
+        mh.msg_control = cbuf;
+        mh.msg_controllen = sizeof(cbuf);
+        struct cmsghdr *c = CMSG_FIRSTHDR(&mh);
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(c), &send_fd, sizeof(int));
+    }
+    ssize_t n;
+    do {
+        n = sendmsg(b->gc_sock, &mh, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
+    if (n != (ssize_t)sizeof(*rq)) {
+        gc_disable(b, "the helper stopped");
+        return false;
+    }
+
+    struct pollfd pfd = { .fd = b->gc_sock, .events = POLLIN };
+    int pr;
+    do {
+        pr = poll(&pfd, 1, timeout_ms);
+    } while (pr < 0 && errno == EINTR);
+    if (pr <= 0) {
+        gc_disable(b, pr == 0 ? "the helper did not answer in time" : "cannot wait for the helper");
+        return false;
+    }
+
+    iov.iov_base = rp;
+    iov.iov_len = sizeof(*rp);
+    memset(&mh, 0, sizeof(mh));
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = cbuf;
+    mh.msg_controllen = sizeof(cbuf);
+    do {
+        n = recvmsg(b->gc_sock, &mh, MSG_CMSG_CLOEXEC);
+    } while (n < 0 && errno == EINTR);
+    int fd = -1;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); n > 0 && c; c = CMSG_NXTHDR(&mh, c))
+        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
+            memcpy(&fd, CMSG_DATA(c), sizeof(int));
+    if (n != (ssize_t)sizeof(*rp) || rp->type != rq->type) {
+        if (fd >= 0)
+            close(fd);
+        gc_disable(b, "the helper stopped");
+        return false;
+    }
+    rp->text[sizeof(rp->text) - 1] = 0;
+    if (recv_fd)
+        *recv_fd = fd;
+    else if (fd >= 0)
+        close(fd);
+    return true;
+}
+
+/* Started on the first GPU frame: by then Android, and with it the GPU
+ * driver the helper links to, is fully up. */
+static bool gc_start(struct bridge *b)
+{
+    const char *helper = b->cfg.gpu_copy_helper;
+    if (access(helper, X_OK) != 0) {
+        char why[PATH_MAX + 32];
+        snprintf(why, sizeof(why), "%s is missing", helper);
+        gc_disable(b, why);
+        return false;
+    }
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) < 0) {
+        gc_disable(b, "cannot create a socket");
+        return false;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        gc_disable(b, "cannot start the helper");
+        return false;
+    }
+    if (pid == 0) {
+        if (sv[1] == 3)
+            fcntl(3, F_SETFD, 0);
+        else if (dup2(sv[1], 3) < 0)
+            _exit(127);
+        signal(SIGPIPE, SIG_DFL);
+        execl(helper, helper, "3", (char *)NULL);
+        _exit(127);
+    }
+    close(sv[1]);
+    b->gc_sock = sv[0];
+    b->gc_pid = pid;
+
+    struct gc_request rq = { .type = GC_HELLO, .aux = GC_VERSION };
+    struct gc_reply rp;
+    /* The first EGL start loads the driver and may compile shaders. */
+    if (!gc_call(b, &rq, -1, &rp, NULL, 15000))
+        return false;
+    if (rp.status != 0) {
+        gc_disable(b, rp.text[0] ? rp.text : "the helper cannot use the GPU");
+        return false;
+    }
+    b->gc_ready = true;
+    INFO("GPU copy: Android's frames are copied to Anland by the GPU: %s", rp.text);
+    return true;
+}
+
+static void gc_forget_source(struct bridge *b, uint32_t id)
+{
+    if (!b->gc_ready)
+        return;
+    struct gc_request rq = { .type = GC_FORGET_SOURCE, .id = id };
+    struct gc_reply rp;
+    gc_call(b, &rq, -1, &rp, NULL, 1000);
+}
+
+/* The Anland buffers are gone (app disconnected); the helper drops its copies. */
+static void gc_reset_targets(struct bridge *b)
+{
+    if (!b->gc_ready || !b->gc_targets) {
+        b->gc_targets = 0;
+        return;
+    }
+    b->gc_targets = 0;
+    struct gc_request rq = { .type = GC_RESET_TARGETS };
+    struct gc_reply rp;
+    gc_call(b, &rq, -1, &rp, NULL, 1000);
+}
+
+static uint32_t ahb_to_fourcc(uint32_t format)
+{
+    switch (format) {
+    case AHB_FORMAT_RGBA_8888:    return DRM_FORMAT_ABGR8888;
+    case AHB_FORMAT_RGBX_8888:    return DRM_FORMAT_XBGR8888;
+    case AHB_FORMAT_RGBA_1010102: return FOURCC('A', 'B', '3', '0');
+    default:                      return 0;
+    }
+}
+
+/* Copies a GPU frame into Anland buffer idx with the GPU. Returns false when
+ * the CPU has to do it; *fence is the render-done fence or -1. */
+static bool gc_copy(struct bridge *b, struct dmabuf_buffer *d, struct target *t, int idx, int *fence)
+{
+    *fence = -1;
+    if (!gc_wanted(b) || idx < 0 || idx >= 32)
+        return false;
+    if (!b->gc_ready && !gc_start(b))
+        return false;
+
+    struct gc_reply rp;
+    if (!(b->gc_targets & (1u << idx))) {
+        struct gc_request rq = {
+            .type = GC_TARGET, .id = (uint32_t)idx,
+            .width = t->info.width, .height = t->info.height,
+            .stride = t->info.stride, .offset = t->info.offset,
+            .fourcc = ahb_to_fourcc(t->info.format), .modifier = t->info.modifier,
+        };
+        if (!gc_call(b, &rq, t->fd, &rp, NULL, 3000))
+            return false;
+        if (rp.status != 0) {
+            gc_disable(b, rp.text);
+            return false;
+        }
+        b->gc_targets |= 1u << idx;
+    }
+    if (!d->gc_id) {
+        uint32_t id = ++b->gc_next_id;
+        if (!id)
+            id = ++b->gc_next_id;
+        struct gc_request rq = {
+            .type = GC_SOURCE, .id = id,
+            .width = d->width, .height = d->height,
+            .stride = d->stride, .offset = d->offset,
+            .fourcc = d->format, .modifier = d->modifier,
+        };
+        if (!gc_call(b, &rq, d->fd, &rp, NULL, 3000))
+            return false;
+        if (rp.status != 0) {
+            gc_disable(b, rp.text);
+            return false;
+        }
+        d->gc_id = id;
+    }
+    struct gc_request rq = { .type = GC_COPY, .id = d->gc_id, .aux = (uint32_t)idx };
+    if (!gc_call(b, &rq, -1, &rp, fence, 2000))
+        return false;
+    if (rp.status != 0) {
+        if (*fence >= 0)
+            close(*fence);
+        *fence = -1;
+        gc_disable(b, rp.text);
+        return false;
+    }
+    return true;
+}
+
+/* Copies a committed buffer of either kind. */
+static bool copy_buffer(struct bridge *b, struct wl_resource *buffer, struct target *t, int idx,
+                        int *fence, bool *by_gpu)
+{
+    *fence = -1;
+    *by_gpu = false;
+    struct frame_src f = { 0 };
+    struct wl_shm_buffer *shm = wl_shm_buffer_get(buffer);
+    if (shm) {
+        uint32_t fmt = wl_shm_buffer_get_format(shm);
+        f.width = (uint32_t)wl_shm_buffer_get_width(shm);
+        f.height = (uint32_t)wl_shm_buffer_get_height(shm);
+        f.stride = (uint32_t)wl_shm_buffer_get_stride(shm);
+        f.format = fmt == WL_SHM_FORMAT_ARGB8888 ? DRM_FORMAT_ARGB8888
+                 : fmt == WL_SHM_FORMAT_XRGB8888 ? DRM_FORMAT_XRGB8888 : fmt;
+        wl_shm_buffer_begin_access(shm);
+        f.data = wl_shm_buffer_get_data(shm);
+        bool ok = copy_frame(b, &f, t);
+        wl_shm_buffer_end_access(shm);
+        if (!ok)
+            WARN("cannot convert Android frame (shm format 0x%x)", fmt);
+        return ok;
+    }
+    struct dmabuf_buffer *d = dmabuf_buffer_get(buffer);
+    if (!d)
+        return false;
+    if (gc_copy(b, d, t, idx, fence)) {
+        *by_gpu = true;
+        return true;
+    }
+    f.width = d->width;
+    f.height = d->height;
+    f.stride = d->stride;
+    f.format = d->format;
+    f.data = dmabuf_buffer_pixels(d);
+    if (!f.data)
+        return false;
+    dmabuf_sync(d->fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+    if (dmabuf_bytes_per_pixel(d->format) != 4) {
+        f.data = widen_to_abgr(f.data, d->width, d->height, d->stride, d->format);
+        f.stride = d->width * 4;
+        f.format = DRM_FORMAT_ABGR8888;
+    }
+    bool ok = copy_frame(b, &f, t);
+    dmabuf_sync(d->fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+    if (!ok)
+        WARN("cannot convert Android frame (dmabuf format 0x%08x)", d->format);
+    return ok;
+}
+
+static void params_destroy_request(struct wl_client *c, struct wl_resource *r)
+{
+    (void)c;
+    wl_resource_destroy(r);
+}
+
+static void params_resource_destroy(struct wl_resource *r)
+{
+    struct dmabuf_params *p = wl_resource_get_user_data(r);
+    if (p->fd >= 0)
+        close(p->fd);
+    free(p);
+}
+
+static void params_add(struct wl_client *c, struct wl_resource *r, int32_t fd, uint32_t plane_idx,
+                       uint32_t offset, uint32_t stride, uint32_t mod_hi, uint32_t mod_lo)
+{
+    struct dmabuf_params *p = wl_resource_get_user_data(r);
+    (void)c;
+    if (p->used) {
+        close(fd);
+        wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_ALREADY_USED,
+                               "params was already used to create a wl_buffer");
+        return;
+    }
+    if (plane_idx != 0) {
+        close(fd);
+        wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_PLANE_IDX,
+                               "only single-plane formats are supported");
+        return;
+    }
+    if (p->fd >= 0) {
+        close(fd);
+        wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_PLANE_SET,
+                               "plane 0 was already set");
+        return;
+    }
+    p->fd = fd;
+    p->offset = offset;
+    p->stride = stride;
+    p->modifier = ((uint64_t)mod_hi << 32) | mod_lo;
+}
+
+/* Returns the new buffer, or NULL after having told the client why. */
+static struct wl_resource *params_build(struct wl_client *c, struct dmabuf_params *p,
+                                        uint32_t buffer_id, int32_t width, int32_t height,
+                                        uint32_t format, bool immediate)
+{
+    const char *why = NULL;
+    uint32_t code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_WL_BUFFER;
+    if (p->used) {
+        why = "params was already used";
+        code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_ALREADY_USED;
+    } else if (p->fd < 0) {
+        why = "no plane was added";
+        code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INCOMPLETE;
+    } else if (width <= 0 || height <= 0) {
+        why = "invalid size";
+        code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_DIMENSIONS;
+    } else if (!dmabuf_format_supported(format)) {
+        why = "unsupported format";
+        code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT;
+    } else if (p->modifier != DRM_FORMAT_MOD_LINEAR && p->modifier != DRM_FORMAT_MOD_INVALID) {
+        why = "only linear buffers can be read by the CPU";
+        code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT;
+    } else if (p->stride / dmabuf_bytes_per_pixel(format) < (uint32_t)width) {
+        why = "stride is smaller than a row";
+        code = ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_OUT_OF_BOUNDS;
+    }
+    p->used = true;
+
+    struct dmabuf_buffer *d = NULL;
+    struct wl_resource *res = NULL;
+    if (!why) {
+        d = calloc(1, sizeof(*d));
+        res = d ? wl_resource_create(c, &wl_buffer_interface, 1, buffer_id) : NULL;
+        if (!res) {
+            free(d);
+            wl_client_post_no_memory(c);
+            return NULL;
+        }
+        d->bridge = p->bridge;
+        d->resource = res;
+        d->fd = p->fd;
+        p->fd = -1;
+        d->offset = p->offset;
+        d->stride = p->stride;
+        d->width = (uint32_t)width;
+        d->height = (uint32_t)height;
+        d->format = format;
+        d->modifier = p->modifier;
+        wl_resource_set_implementation(res, &dmabuf_buffer_impl, d, dmabuf_buffer_resource_destroy);
+        return res;
+    }
+
+    WARN("refusing Android's GPU buffer %dx%d format 0x%08x: %s", width, height, format, why);
+    if (immediate)
+        wl_resource_post_error(p->resource, code, "%s", why);
+    else
+        zwp_linux_buffer_params_v1_send_failed(p->resource);
+    return NULL;
+}
+
+static void params_create(struct wl_client *c, struct wl_resource *r, int32_t width,
+                          int32_t height, uint32_t format, uint32_t flags)
+{
+    struct dmabuf_params *p = wl_resource_get_user_data(r);
+    (void)flags;
+    struct wl_resource *buffer = params_build(c, p, 0, width, height, format, false);
+    if (buffer)
+        zwp_linux_buffer_params_v1_send_created(r, buffer);
+}
+
+static void params_create_immed(struct wl_client *c, struct wl_resource *r, uint32_t buffer_id,
+                                int32_t width, int32_t height, uint32_t format, uint32_t flags)
+{
+    struct dmabuf_params *p = wl_resource_get_user_data(r);
+    (void)flags;
+    params_build(c, p, buffer_id, width, height, format, true);
+}
+
+static const struct zwp_linux_buffer_params_v1_interface params_impl = {
+    .destroy = params_destroy_request,
+    .add = params_add,
+    .create = params_create,
+    .create_immed = params_create_immed,
+};
+
+static void linux_dmabuf_destroy(struct wl_client *c, struct wl_resource *r)
+{
+    (void)c;
+    wl_resource_destroy(r);
+}
+
+static void linux_dmabuf_create_params(struct wl_client *c, struct wl_resource *r, uint32_t id)
+{
+    struct dmabuf_params *p = calloc(1, sizeof(*p));
+    struct wl_resource *res = p ? wl_resource_create(c, &zwp_linux_buffer_params_v1_interface,
+                                                     wl_resource_get_version(r), id) : NULL;
+    if (!res) {
+        free(p);
+        wl_client_post_no_memory(c);
+        return;
+    }
+    p->bridge = wl_resource_get_user_data(r);
+    p->resource = res;
+    p->fd = -1;
+    wl_resource_set_implementation(res, &params_impl, p, params_resource_destroy);
+}
+
+static const struct zwp_linux_dmabuf_v1_interface linux_dmabuf_impl = {
+    .destroy = linux_dmabuf_destroy,
+    .create_params = linux_dmabuf_create_params,
+    /* The feedback requests belong to version 4; only 3 is advertised. */
+    .get_default_feedback = NULL,
+    .get_surface_feedback = NULL,
+};
+
+static void bind_linux_dmabuf(struct wl_client *c, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *r = wl_resource_create(c, &zwp_linux_dmabuf_v1_interface, (int)version, id);
+    if (!r) {
+        wl_client_post_no_memory(c);
+        return;
+    }
+    wl_resource_set_implementation(r, &linux_dmabuf_impl, data, NULL);
+    for (size_t i = 0; i < sizeof(dmabuf_formats) / sizeof(dmabuf_formats[0]); i++) {
+        if (version >= ZWP_LINUX_DMABUF_V1_MODIFIER_SINCE_VERSION) {
+            zwp_linux_dmabuf_v1_send_modifier(r, dmabuf_formats[i],
+                                              (uint32_t)(DRM_FORMAT_MOD_LINEAR >> 32),
+                                              (uint32_t)(DRM_FORMAT_MOD_LINEAR & 0xffffffffu));
+        } else {
+            zwp_linux_dmabuf_v1_send_format(r, dmabuf_formats[i]);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------- */
 /* Geometry                                                                  */
 /* ------------------------------------------------------------------------- */
 
-static uint32_t scaled_dim(uint32_t v, int percent)
-{
-    uint32_t r = (uint32_t)(((uint64_t)v * (uint32_t)percent + 50) / 100);
-    r &= ~1u; /* keep it even, some Android paths dislike odd sizes */
-    return r < 64 ? 64 : r;
-}
-
 static uint32_t advertised_refresh(struct bridge *b)
 {
+    uint32_t refresh = b->refresh_mhz;
+    if (b->cfg.max_fps < 0)
+        return refresh;
     uint32_t cap = (uint32_t)b->cfg.max_fps * 1000u;
-    uint32_t r = b->refresh_mhz;
-    if (r < 1000 || r > 1000000)
-        r = 60000;
-    return r > cap ? cap : r;
+    return refresh > cap ? cap : refresh;
 }
 
 static void send_output_state(struct bridge *b, struct wl_resource *out)
@@ -394,22 +1066,27 @@ static void send_output_state(struct bridge *b, struct wl_resource *out)
         wl_output_send_done(out);
 }
 
-/* Called whenever the size Android should render at may have changed. */
-static void set_client_size(struct bridge *b, uint32_t w, uint32_t h, bool from_display)
+static void set_client_display(struct bridge *b, uint32_t w, uint32_t h, uint32_t refresh)
 {
-    if (from_display)
-        b->size_from_display = true;
-    if (w == b->client_w && h == b->client_h)
+    bool resized = w != b->client_w || h != b->client_h;
+    uint32_t previous_refresh = advertised_refresh(b);
+    b->refresh_mhz = refresh;
+    bool refresh_changed = advertised_refresh(b) != previous_refresh;
+    if (!resized && !refresh_changed)
         return;
     b->client_w = w;
     b->client_h = h;
-    INFO("Android display size is now %ux%u (%s)", w, h,
-         from_display ? "from the Anland app" : "default, no Anland app yet");
+    if (resized)
+        INFO("Android display size is now %ux%u (from the Anland app)", w, h);
+    if (refresh_changed) {
+        b->next_present_ns = 0;
+        INFO("Android output refresh is now %u mHz", advertised_refresh(b));
+    }
 
     struct wl_resource *out;
     wl_resource_for_each(out, &b->outputs)
         send_output_state(b, out);
-    if (b->top && b->top->configure_sent)
+    if (resized && b->top && b->top->configure_sent)
         send_toplevel_configure(b->top);
 }
 
@@ -419,6 +1096,7 @@ static void set_client_size(struct bridge *b, uint32_t w, uint32_t h, bool from_
 
 static void session_teardown(struct bridge *b)
 {
+    anland_clipboard_cancel_receive(b->clipboard);
     if (b->audio_source) { wl_event_source_remove(b->audio_source); b->audio_source = NULL; }
     b->audio_fd = -1;
     if (b->ready_source) { wl_event_source_remove(b->ready_source); b->ready_source = NULL; }
@@ -429,7 +1107,11 @@ static void session_teardown(struct bridge *b)
         b->targets[i].map = NULL;
     }
     b->target_count = 0;
+    gc_reset_targets(b);
     b->target_ready = false;
+    b->first_frame_presented = false;
+    b->last_delivered_serial = 0;
+    b->next_present_ns = 0;
     if (b->session)
         INFO("Anland app disconnected; Android keeps running, waiting for it to come back");
     b->session = false;
@@ -445,22 +1127,43 @@ static void touch_send_all(struct bridge *b, int action, int id, float x, float 
 static void touch_frame_all(struct bridge *b);
 static void key_send_all(struct bridge *b, uint32_t key, bool pressed);
 
-static void drain_payload(struct bridge *b, uint32_t size)
+static void flush_clipboard_output(struct bridge *b)
 {
-    if (size == 0)
+    int pending = flush_queued_output(b->ctx);
+    if (pending >= 0 && b->data_source)
+        wl_event_source_fd_update(b->data_source,
+                                  WL_EVENT_READABLE | (pending ? WL_EVENT_WRITABLE : 0));
+}
+
+static void send_clipboard_to_anland(void *data, const void *text, size_t size)
+{
+    struct bridge *b = data;
+    if (b->session && queue_clipboard(b->ctx, text, size) == 0)
+        flush_clipboard_output(b);
+}
+
+static void read_input_payload(struct bridge *b, uint32_t size, bool clipboard)
+{
+    if (size == 0) {
+        if (clipboard)
+            anland_clipboard_set_text(b->clipboard, NULL, 0);
         return;
-    if (size > (4u << 20)) { /* never trust a huge length */
+    }
+    if (size > (4u << 20)) { /* Bound allocations, even for messages we discard. */
         force_fallback(b->ctx);
         return;
     }
     void *buf = malloc(size);
     if (!buf) { force_fallback(b->ctx); return; }
     uint64_t deadline = now_ms64() + 3000;
-    for (;;) {
-        int rc = poll_input_event_extend_data(b->ctx, buf, size, 200);
-        if (rc != 0 || now_ms64() > deadline || !b->session)
-            break;
-    }
+    int rc;
+    do {
+        rc = poll_input_event_extend_data(b->ctx, buf, size, 200);
+    } while (rc == 0 && b->session && now_ms64() < deadline);
+    if (rc == 1 && clipboard && size <= ANLAND_CLIPBOARD_LIMIT)
+        anland_clipboard_set_text(b->clipboard, buf, size);
+    else if (rc == 0 && b->session)
+        force_fallback(b->ctx);
     free(buf);
 }
 
@@ -500,15 +1203,15 @@ static void handle_input_event(struct bridge *b, const struct InputEvent *ev)
     case INPUT_TYPE_DISPLAY_REFRESH:
         if (ev->display.refresh_mhz >= 1000 && ev->display.refresh_mhz <= 1000000 &&
             ev->display.refresh_mhz != b->refresh_mhz) {
-            b->refresh_mhz = ev->display.refresh_mhz;
-            DBG("Anland refresh rate: %u mHz", b->refresh_mhz);
+            set_client_display(b, b->client_w, b->client_h, ev->display.refresh_mhz);
+            maybe_present(b);
         }
         break;
     case INPUT_TYPE_CLIPBOARD:
-        drain_payload(b, ev->clipboard.size);
+        read_input_payload(b, ev->clipboard.size, true);
         break;
     case INPUT_TYPE_TEXT_INPUT:
-        drain_payload(b, ev->text_input.size);
+        read_input_payload(b, ev->text_input.size, false);
         break;
     case INPUT_TYPE_RESOURCE: {
         int fds[64], count = 0;
@@ -534,6 +1237,8 @@ static int on_data(int fd, uint32_t mask, void *data)
             force_fallback(b->ctx);
         return 0;
     }
+    if (mask & WL_EVENT_WRITABLE)
+        flush_clipboard_output(b);
     for (int i = 0; i < 256 && b->session; i++) {
         struct InputEvent ev;
         int rc = poll_input_event(b->ctx, &ev, 0);
@@ -554,11 +1259,22 @@ static int on_buffer_ready(int fd, uint32_t mask, void *data)
         return 0;
     }
     uint64_t value;
-    if (read(fd, &value, sizeof(value)) < 0 && errno != EAGAIN && errno != EINTR)
+    if (read(fd, &value, sizeof(value)) == sizeof(value)) {
+        b->target_ready = true;
+        maybe_present(b);
+    } else if (errno != EAGAIN && errno != EINTR) {
         DBG("buffer-ready read: %s", strerror(errno));
-    b->target_ready = true;
-    maybe_present(b);
+    }
     return 0;
+}
+
+static bool target_layout_valid(const struct buf_info *info)
+{
+    return info->width > 0 && info->width <= 16384 && info->height > 0 && info->height <= 16384 &&
+           info->stride >= info->width * 4 && info->stride % 4 == 0 && info->offset % 4 == 0 &&
+           info->modifier == 0 &&
+           (info->format == AHB_FORMAT_RGBA_8888 || info->format == AHB_FORMAT_RGBX_8888 ||
+            info->format == AHB_FORMAT_RGBA_1010102);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -644,10 +1360,22 @@ static bool session_start(struct bridge *b)
         t->fd = get_dmabuf_fd_at(b->ctx, i);
         if (t->fd < 0 || get_dmabuf_info_at(b->ctx, i, &t->info) < 0) {
             WARN("Anland buffer %d has no descriptor", i);
-            b->target_count = i;
             return false;
         }
-        t->len = (size_t)t->info.offset + (size_t)t->info.stride * t->info.height;
+        if (!target_layout_valid(&t->info)) {
+            WARN("unsupported Anland buffer %d layout (%ux%u stride %u format %u modifier 0x%llx offset %u)",
+                 i, t->info.width, t->info.height, t->info.stride, t->info.format,
+                 (unsigned long long)t->info.modifier, t->info.offset);
+            return false;
+        }
+        uint64_t len = t->info.offset + (uint64_t)t->info.stride * (t->info.height - 1) + t->info.width * 4;
+        /* Linux DMA-BUFs and the test's memfds both expose their size via SEEK_END. */
+        off_t size = lseek(t->fd, 0, SEEK_END);
+        if (len > SIZE_MAX || (size >= 0 && len > (uint64_t)size)) {
+            WARN("Anland buffer %d is too small for the reported layout", i);
+            return false;
+        }
+        t->len = (size_t)len;
         t->map = mmap(NULL, t->len, PROT_READ | PROT_WRITE, MAP_SHARED, t->fd, 0);
         if (t->map == MAP_FAILED) {
             WARN("cannot map Anland buffer %d (%ux%u stride %u format %u): %s. "
@@ -655,35 +1383,32 @@ static bool session_start(struct bridge *b)
                  i, t->info.width, t->info.height, t->info.stride, t->info.format,
                  strerror(errno));
             t->map = NULL;
-            b->target_count = i;
             return false;
         }
         b->target_count = i + 1;
     }
 
     const struct buf_info *info = &b->targets[0].info;
-    if (info->format != AHB_FORMAT_RGBA_8888 && info->format != AHB_FORMAT_RGBX_8888 &&
-        info->format != AHB_FORMAT_RGBA_1010102)
-        WARN("unexpected Anland pixel format %u, the picture may be wrong", info->format);
-
     uint32_t w = 0, h = 0, fmt = 0, refresh = 0;
     get_screen_info(b->ctx, &w, &h, &fmt, &refresh);
-    if (refresh >= 1000 && refresh <= 1000000)
-        b->refresh_mhz = refresh;
+    if (refresh < 1000 || refresh > 1000000)
+        refresh = 60000;
 
     b->screen_w = info->width;
     b->screen_h = info->height;
     b->session = true;
     b->target_ready = false;
-    b->dirty = true; /* repaint the last Android frame into the new buffers */
-
-    INFO("Anland app connected: %d buffers of %ux%u, stride %u, format %u, %u mHz",
-         count, info->width, info->height, info->stride, info->format, b->refresh_mhz);
 
     b->ready_source = wl_event_loop_add_fd(b->loop, get_buffer_ready_fd(b->ctx),
                                            WL_EVENT_READABLE, on_buffer_ready, b);
     b->data_source = wl_event_loop_add_fd(b->loop, get_data_fd(b->ctx),
                                           WL_EVENT_READABLE, on_data, b);
+    if (!b->ready_source || !b->data_source) {
+        WARN("cannot watch the Anland app's descriptors: %s", strerror(errno));
+        return false;
+    }
+    INFO("Anland app connected: %d buffers of %ux%u, stride %u, format %u, %u mHz",
+         count, info->width, info->height, info->stride, info->format, refresh);
     b->audio_fd = get_audio_fd(b->ctx);
     if (b->audio_fd >= 0 && b->pulse)
         b->audio_source = wl_event_loop_add_fd(b->loop, b->audio_fd, WL_EVENT_READABLE,
@@ -691,8 +1416,10 @@ static bool session_start(struct bridge *b)
     else if (b->audio_fd < 0)
         WARN("this Anland app offers no audio channel; Android will be silent");
 
-    set_client_size(b, scaled_dim(b->screen_w, b->cfg.render_scale),
-                    scaled_dim(b->screen_h, b->cfg.render_scale), true);
+    b->size_from_display = true;
+    set_client_display(b, scaled_dim(b->screen_w, b->cfg.render_scale),
+                       scaled_dim(b->screen_h, b->cfg.render_scale), refresh);
+    b->session_serial++;
     return true;
 }
 
@@ -751,31 +1478,64 @@ static void anland_poll(struct bridge *b)
 
 static void maybe_present(struct bridge *b)
 {
-    if (!b->session || !b->target_ready || !b->dirty)
+    if (!b->session || !b->target_ready)
         return;
-    struct surface *s = b->top;
-    if (!s || !s->buffer)
+
+    uint64_t now = now_ns();
+    if (now < b->next_present_ns) {
+        arm_tick(b, (int)((b->next_present_ns - now + 999999u) / 1000000u));
         return;
-    struct wl_shm_buffer *shm = wl_shm_buffer_get(s->buffer);
-    if (!shm)
-        return;
+    }
 
     int idx = get_selected_idx_raw(b->ctx);
     if (idx < 0 || idx >= b->target_count) {
-        DBG("Anland selected buffer %d which we do not have", idx);
+        WARN("Anland selected buffer %d which we do not have", idx);
+        force_fallback(b->ctx);
         return;
     }
-    if (!copy_frame(b, shm, &b->targets[idx])) {
-        WARN("cannot convert a %dx%d frame (shm format 0x%x) into Anland format %u",
-             wl_shm_buffer_get_width(shm), wl_shm_buffer_get_height(shm),
-             wl_shm_buffer_get_format(shm), b->targets[idx].info.format);
-        b->dirty = false;
-        return;
+    struct target *target = &b->targets[idx];
+    bool copied = false, by_gpu = false;
+    int fence = -1;
+    if (target->frame_serial != b->frame_serial) {
+        if (b->top && b->top->buffer) {
+            copied = copy_buffer(b, b->top->buffer, target, idx, &fence, &by_gpu);
+            if (!copied)
+                b->failed_copies++;
+            else if (by_gpu)
+                b->gpu_copies++;
+            else
+                b->cpu_copies++;
+        }
+        if (!copied)
+            clear_target(target);
+        target->frame_serial = b->frame_serial;
+        target->has_frame = copied;
     }
+    /* Anland waits for the GPU's copy on the GPU, not here. */
+    if (fence >= 0)
+        set_render_fence(b->ctx, fence);
+
+    /* The app waits for one render-done message per selection, even when
+     * Android hasn't started drawing or the selected buffer is up to date. */
     b->target_ready = false;
-    b->dirty = false;
-    b->frames++;
-    trigger_refresh(b->ctx); /* on failure the library drops the session itself */
+    if (trigger_refresh(b->ctx) < 0)
+        return;
+    b->ack_count++;
+    if (target->has_frame && target->frame_serial != b->last_delivered_serial) {
+        b->last_delivered_serial = target->frame_serial;
+        b->delivered_frames++;
+    }
+    /* Keep the phase across timer wakeups so rounding to whole milliseconds
+     * does not turn a period of 8.333 ms into 9 ms on every frame. */
+    uint64_t period_ns = 1000000000000ull / advertised_refresh(b);
+    b->next_present_ns += period_ns;
+    if (b->next_present_ns <= now)
+        b->next_present_ns = now + period_ns;
+    if (copied && !b->first_frame_presented) {
+        INFO("presented the first Android frame to Anland (copied by the %s)",
+             by_gpu ? "GPU" : "CPU");
+        b->first_frame_presented = true;
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -839,6 +1599,8 @@ static void on_buffer_destroy(struct wl_listener *l, void *data)
     (void)data;
     wl_list_remove(&s->buffer_destroy.link);
     s->buffer = NULL;
+    if (s->bridge->top == s)
+        s->bridge->frame_serial++;
 }
 
 static void on_pending_destroy(struct wl_listener *l, void *data)
@@ -925,18 +1687,40 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r)
         return;
     }
 
-    surface_set_buffer(s, buffer);
-    if (!buffer)
-        return;
-    struct wl_shm_buffer *shm = wl_shm_buffer_get(buffer);
-    if (!shm) {
-        WARN("Android sent a buffer that is not shared memory; only software "
-             "rendering (ro.hardware.gralloc=default) is supported by this bridge");
+    if (!buffer) {
+        if (s->buffer) {
+            surface_set_buffer(s, NULL);
+            b->frame_serial++;
+        }
         return;
     }
-    if (wl_shm_buffer_get_width(shm) < 8 || wl_shm_buffer_get_height(shm) < 8)
+    struct wl_shm_buffer *shm = wl_shm_buffer_get(buffer);
+    struct dmabuf_buffer *dmabuf = shm ? NULL : dmabuf_buffer_get(buffer);
+    if (!shm && !dmabuf) {
+        WARN("Android sent a buffer of an unknown kind; ignoring it");
+        wl_buffer_send_release(buffer);
+        return;
+    }
+    int32_t bw = shm ? wl_shm_buffer_get_width(shm) : (int32_t)dmabuf->width;
+    int32_t bh = shm ? wl_shm_buffer_get_height(shm) : (int32_t)dmabuf->height;
+    if (bw < 8 || bh < 8) {
+        wl_buffer_send_release(buffer);
         return; /* the 1x1 probe buffer the HWC uses while it measures the window */
-    b->dirty = true;
+    }
+    if (!s->buffer) {
+        if (shm)
+            INFO("received Android frame (%dx%d, shm format 0x%x, drawn by the CPU)", bw, bh,
+                 wl_shm_buffer_get_format(shm));
+        else
+            INFO("received Android frame (%dx%d, dmabuf format 0x%08x, drawn by the GPU)", bw, bh,
+                 dmabuf->format);
+    }
+    surface_set_buffer(s, buffer);
+    if (shm)
+        b->shm_frames++;
+    else
+        b->dmabuf_frames++;
+    b->frame_serial++;
     maybe_present(b);
 }
 
@@ -992,6 +1776,8 @@ static void surface_resource_destroy(struct wl_resource *r)
         wl_resource_set_user_data(s->toplevel, NULL);
     if (b->top == s) {
         b->top = NULL;
+        anland_clipboard_focus(b->clipboard, NULL);
+        b->frame_serial++;
         b->pointer_down = false;
         INFO("Android closed its display window");
     }
@@ -1092,20 +1878,13 @@ static bool android_setprop(const char *name, const char *value)
     return ok;
 }
 
-/* Android reads its screen density once, when SurfaceFlinger starts, which is
- * right after the composer learns the window size from us. Choosing it here
- * keeps the interface the same physical size whatever resolution (or
- * render_scale) is in use. A density set in the config file wins, because a
- * read-only property can only be set once. */
+/* For older rootfs starters that leave the property unset, advertise a
+ * density to the composer. New starters set it before SurfaceFlinger starts. */
 static void choose_density(struct bridge *b)
 {
     if (b->cfg.ui_width_dp <= 0)
         return;
-    uint32_t shorter = b->client_w < b->client_h ? b->client_w : b->client_h;
-    int density = (int)((shorter * 160u + (uint32_t)b->cfg.ui_width_dp / 2) /
-                        (uint32_t)b->cfg.ui_width_dp);
-    if (density < 120) density = 120;
-    if (density > 640) density = 640;
+    int density = display_density(b->client_w, b->client_h, b->cfg.ui_width_dp);
     char value[16];
     snprintf(value, sizeof(value), "%d", density);
     if (android_setprop("ro.sf.lcd_density", value))
@@ -1134,6 +1913,8 @@ static void send_toplevel_configure(struct surface *s)
     if (!s->configure_sent) {
         s->configure_sent = true;
         keyboard_enter_all(b);
+        if (b->top == s)
+            anland_clipboard_focus(b->clipboard, wl_resource_get_client(s->resource));
     }
 }
 
@@ -1144,8 +1925,11 @@ static void toplevel_resource_destroy(struct wl_resource *r)
         return;
     s->toplevel = NULL;
     s->configure_sent = false;
-    if (s->bridge->top == s)
+    if (s->bridge->top == s) {
         s->bridge->top = NULL;
+        anland_clipboard_focus(s->bridge->clipboard, NULL);
+        s->bridge->frame_serial++;
+    }
 }
 
 static void xdg_surface_destroy_request(struct wl_client *c, struct wl_resource *r)
@@ -1435,9 +2219,48 @@ static void fire_frame_callbacks(struct bridge *b)
     }
 }
 
+static void publish_benchmark(struct bridge *b, uint64_t now)
+{
+    if (!b->cfg.benchmark_path[0] || now < b->next_sample_ms)
+        return;
+    b->next_sample_ms = now + 500;
+
+    char request[PATH_MAX + 16];
+    snprintf(request, sizeof(request), "%s.request", b->cfg.benchmark_path);
+    struct stat st;
+    time_t wall = time(NULL);
+    if (lstat(request, &st) < 0 || !S_ISREG(st.st_mode) ||
+        st.st_mtime > wall || wall - st.st_mtime > 3)
+        return;
+
+    if (!b->kgsl_open) {
+        int gpu_fd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
+        b->kgsl_open = gpu_fd >= 0 ? 1 : -1;
+        if (gpu_fd >= 0)
+            close(gpu_fd);
+    }
+    char snapshot[PATH_MAX + 16], temporary[PATH_MAX + 16];
+    snprintf(snapshot, sizeof(snapshot), "%s.stats", b->cfg.benchmark_path);
+    snprintf(temporary, sizeof(temporary), "%s.stats.XXXXXX", b->cfg.benchmark_path);
+    int fd = mkostemp(temporary, O_CLOEXEC);
+    if (fd < 0)
+        return;
+    int written = dprintf(fd,
+        "1 %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %d %d %d %u %u %u %u %u %u"
+        " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+        " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+        (int)getpid(), b->start_ms, b->session_serial, now, b->session,
+        b->cfg.gpu, b->kgsl_open, b->client_w, b->client_h, b->screen_w, b->screen_h,
+        b->refresh_mhz, advertised_refresh(b), b->shm_frames, b->dmabuf_frames,
+        b->delivered_frames, b->ack_count, b->cpu_copies, b->gpu_copies, b->failed_copies);
+    if (close(fd) < 0 || written < 0 || rename(temporary, snapshot) < 0)
+        unlink(temporary);
+}
+
 static int on_tick(void *data)
 {
     struct bridge *b = data;
+    b->tick_due_ms = 0;
 
     anland_poll(b);
 
@@ -1453,11 +2276,12 @@ static int on_tick(void *data)
     fire_frame_callbacks(b);
 
     uint64_t now = now_ms64();
+    publish_benchmark(b, now);
     if (g_verbose && now - b->last_stats_ms >= 5000) {
-        DBG("%.1f frames/s shown, session=%d", (b->frames - b->last_frames) * 1000.0 /
+        DBG("%.1f new frames/s sent, session=%d", (b->delivered_frames - b->last_frames) * 1000.0 /
             (double)(now - b->last_stats_ms), b->session);
         b->last_stats_ms = now;
-        b->last_frames = b->frames;
+        b->last_frames = b->delivered_frames;
     }
 
     /* Frames and input arrive as events on their own descriptors, so with a
@@ -1473,7 +2297,6 @@ static int on_tick(void *data)
         next = 100;
     else
         next = 500;
-    b->tick_due_ms = 0;
     arm_tick(b, next);
     return 0;
 }
@@ -1532,14 +2355,22 @@ static void config_set(struct config *c, const char *key, const char *value)
         snprintf(c->display_name, sizeof(c->display_name), "%s", value);
     else if (!strcmp(key, "log"))
         snprintf(c->log_path, sizeof(c->log_path), "%s", value);
+    else if (!strcmp(key, "benchmark_path"))
+        snprintf(c->benchmark_path, sizeof(c->benchmark_path), "%s", value);
     else if (!strcmp(key, "default_width"))
         c->default_width = atoi(value);
     else if (!strcmp(key, "default_height"))
         c->default_height = atoi(value);
     else if (!strcmp(key, "render_scale"))
-        c->render_scale = atoi(value);
+        c->render_scale = !strcmp(value, "auto") ? -1 : atoi(value);
     else if (!strcmp(key, "max_fps"))
-        c->max_fps = atoi(value);
+        c->max_fps = !strcmp(value, "auto") ? -1 : atoi(value);
+    else if (!strcmp(key, "gpu"))
+        c->gpu = !strcmp(value, "auto") ? -1 : atoi(value) != 0;
+    else if (!strcmp(key, "gpu_copy"))
+        c->gpu_copy = !strcmp(value, "auto") ? -1 : atoi(value) != 0;
+    else if (!strcmp(key, "gpu_copy_helper"))
+        snprintf(c->gpu_copy_helper, sizeof(c->gpu_copy_helper), "%s", value);
     else if (!strcmp(key, "wait_for_display"))
         c->wait_for_display_ms = atoi(value) * 1000;
     else if (!strcmp(key, "ui_width_dp"))
@@ -1571,12 +2402,43 @@ static void config_load(struct config *c, const char *path)
     fclose(f);
 }
 
+/* Whether /sbin/init chose the Adreno GPU driver for Android this boot. */
+static bool android_uses_gpu(void)
+{
+    FILE *f = fopen(ANDROID_PROP_FILE, "r");
+    if (!f)
+        return false;
+    char line[512];
+    bool gpu = false;
+    while (fgets(line, sizeof(line), f)) {
+        char *s = trim(line);
+        if (!strncmp(s, "ro.hardware.egl=", 16))
+            gpu = !strcmp(s + 16, "kgsl");
+    }
+    fclose(f);
+    return gpu;
+}
+
+/* GPU auto follows Anland's refresh. CPU auto caps it at 30 Hz. */
+static void config_resolve_auto(struct config *c)
+{
+    if (c->gpu < 0)
+        c->gpu = android_uses_gpu();
+    bool gpu = c->gpu == 1;
+    if (c->gpu_copy < 0)
+        c->gpu_copy = gpu;
+    if (c->render_scale < 0)
+        c->render_scale = gpu ? 100 : 50;
+    if (c->max_fps < 0 && !gpu)
+        c->max_fps = 30;
+}
+
 static void config_clamp(struct config *c)
 {
-    if (c->default_width < 64 || c->default_width > 16384) c->default_width = 1080;
-    if (c->default_height < 64 || c->default_height > 16384) c->default_height = 1920;
+    if (c->default_width < 64 || c->default_width > 16384) c->default_width = DEFAULT_DISPLAY_WIDTH;
+    if (c->default_height < 64 || c->default_height > 16384) c->default_height = DEFAULT_DISPLAY_HEIGHT;
     if (c->render_scale < 10 || c->render_scale > 100) c->render_scale = 100;
-    if (c->max_fps < 1 || c->max_fps > 240) c->max_fps = 60;
+    if (c->max_fps < -1 || c->max_fps == 0 || c->max_fps > 240) c->max_fps = 60;
     if (c->wait_for_display_ms < 0 || c->wait_for_display_ms > 600000)
         c->wait_for_display_ms = 20000;
     if (c->ui_width_dp < 0 || c->ui_width_dp > 2000) c->ui_width_dp = 0;
@@ -1591,13 +2453,20 @@ static void usage(const char *argv0)
         "  --runtime_dir DIR      where the Wayland socket is created (default /run/xdg)\n"
         "  --wayland_display NAME Wayland socket name (default wayland-0)\n"
         "  --default_width N --default_height N   size used until the Anland app connects\n"
-        "  --render_scale PCT     Android renders at this percentage of the screen (10-100)\n"
+        "  --render_scale PCT     Android renders at this percentage of the screen (10-100,\n"
+        "                         auto = 100 when Android draws with the GPU, else 50)\n"
         "  --max_fps N            upper limit for the refresh rate reported to Android\n"
+        "                         (auto = follow Anland with the GPU, else cap at 30)\n"
+        "  --gpu auto|0|1         whether Android draws with the GPU, for the auto values\n"
+        "                         (auto reads ro.hardware.egl from " ANDROID_PROP_FILE ")\n"
+        "  --gpu_copy auto|0|1    copy GPU frames to Anland with the GPU (auto = when --gpu)\n"
+        "  --gpu_copy_helper PATH the helper that does it (default " DEFAULT_GPU_COPY_HELPER ")\n"
         "  --wait_for_display S   seconds to wait for the Anland app before using the default size\n"
         "  --ui_width_dp N        choose Android's density so the short screen side is N dp (0 = off)\n"
         "  --pulse_socket PATH    PulseAudio socket for Android's sound (default\n"
         "                         <runtime_dir>/pulse/native, \"off\" for none)\n"
         "  --log FILE             also write messages to FILE\n"
+        "  --benchmark_path PATH  prefix for the on-demand benchmark files\n"
         "  --verbose 1            extra messages\n", argv0);
 }
 
@@ -1610,10 +2479,14 @@ int main(int argc, char **argv)
     snprintf(c->anland_socket, sizeof(c->anland_socket), "/run/display.sock");
     snprintf(c->runtime_dir, sizeof(c->runtime_dir), "/run/xdg");
     snprintf(c->display_name, sizeof(c->display_name), "wayland-0");
-    c->default_width = 1080;
-    c->default_height = 1920;
-    c->render_scale = 100;
-    c->max_fps = 60;
+    snprintf(c->benchmark_path, sizeof(c->benchmark_path), "/ds-waydroid-benchmark");
+    c->default_width = DEFAULT_DISPLAY_WIDTH;
+    c->default_height = DEFAULT_DISPLAY_HEIGHT;
+    c->render_scale = -1;
+    c->max_fps = -1;
+    c->gpu = -1;
+    c->gpu_copy = -1;
+    snprintf(c->gpu_copy_helper, sizeof(c->gpu_copy_helper), "%s", DEFAULT_GPU_COPY_HELPER);
     c->wait_for_display_ms = 20000;
     c->ui_width_dp = 0;
     b->audio_fd = -1;
@@ -1634,12 +2507,18 @@ int main(int argc, char **argv)
             config_set(c, key, argv[++i]);
         }
     }
+    config_resolve_auto(c);
     config_clamp(c);
     /* Matches waydroid.pulse_runtime_path (<runtime_dir>/pulse) by default. */
     if (!c->pulse_socket[0])
         snprintf(c->pulse_socket, sizeof(c->pulse_socket), "%s/pulse/native", c->runtime_dir);
 
     if (c->log_path[0]) {
+        /* Keep the report of the start before (a failed GPU start is often
+         * followed by a start in CPU mode). */
+        char previous[PATH_MAX + 16];
+        snprintf(previous, sizeof(previous), "%s.previous", c->log_path);
+        rename(c->log_path, previous);
         g_log_file = fopen(c->log_path, "w");
         if (g_log_file)
             fchmod(fileno(g_log_file), 0644);
@@ -1651,9 +2530,11 @@ int main(int argc, char **argv)
     wl_list_init(&b->touches);
     b->start_ms = now_ms64();
     b->last_stats_ms = b->start_ms;
+    b->frame_serial = 1; /* Newly mapped Anland buffers start unwritten (serial 0). */
     b->refresh_mhz = 60000;
-    b->client_w = (uint32_t)c->default_width;
-    b->client_h = (uint32_t)c->default_height;
+    b->client_w = scaled_dim((uint32_t)c->default_width, c->render_scale);
+    b->client_h = scaled_dim((uint32_t)c->default_height, c->render_scale);
+    b->gc_sock = -1;
 
     if (mkdir_p(c->runtime_dir, 0777) < 0)
         WARN("cannot prepare %s: %s", c->runtime_dir, strerror(errno));
@@ -1689,8 +2570,15 @@ int main(int argc, char **argv)
     if (!wl_global_create(b->display, &wl_compositor_interface, 4, b, bind_compositor) ||
         !wl_global_create(b->display, &xdg_wm_base_interface, 1, b, bind_wm_base) ||
         !wl_global_create(b->display, &wl_seat_interface, 5, b, bind_seat) ||
-        !wl_global_create(b->display, &wl_output_interface, 3, b, bind_output)) {
+        !wl_global_create(b->display, &wl_output_interface, 3, b, bind_output) ||
+        !wl_global_create(b->display, &zwp_linux_dmabuf_v1_interface, 3, b, bind_linux_dmabuf)) {
         WARN("cannot register Wayland globals");
+        return 1;
+    }
+
+    b->clipboard = anland_clipboard_create(b->display, send_clipboard_to_anland, b);
+    if (!b->clipboard) {
+        WARN("cannot register the Wayland clipboard");
         return 1;
     }
 
@@ -1708,9 +2596,15 @@ int main(int argc, char **argv)
     b->tick = wl_event_loop_add_timer(b->loop, on_tick, b);
     arm_tick(b, 1);
 
-    INFO("ready: Wayland socket %s, Anland socket %s, default %dx%d, scale %d%%, max %d fps",
+    char fps_limit[32];
+    if (c->max_fps < 0)
+        snprintf(fps_limit, sizeof(fps_limit), "follows Anland refresh");
+    else
+        snprintf(fps_limit, sizeof(fps_limit), "max %d fps", c->max_fps);
+    INFO("ready: Wayland socket %s, Anland socket %s, default %dx%d, scale %d%%, %s, "
+         "Android draws with the %s",
          path, c->anland_socket, c->default_width, c->default_height, c->render_scale,
-         c->max_fps);
+         fps_limit, c->gpu == 1 ? "GPU" : "CPU");
 
     wl_display_run(b->display);
 
@@ -1720,7 +2614,9 @@ int main(int argc, char **argv)
     }
     pulse_server_destroy(b->pulse);
     wl_display_destroy_clients(b->display);
+    anland_clipboard_destroy(b->clipboard);
     wl_display_destroy(b->display);
+    gc_stop(b);
     free(b->xmap);
     free(b);
     return 0;

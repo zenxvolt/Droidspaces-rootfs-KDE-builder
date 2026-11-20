@@ -11,6 +11,7 @@
  *     private binder instance (the host's binder must never be shared);
  *   - hides the host kernel command line so the phone's own androidboot.*
  *     parameters do not leak into the guest;
+ *   - chooses between the Adreno GPU driver and CPU drawing;
  *   - writes /vendor/waydroid.prop from one plain-text config file;
  *   - then replaces itself with Android's /init, which stays PID 1.
  *
@@ -46,6 +47,8 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "display-geometry.h"
 
 #define CONFIG_PATH   "/system/etc/droidspaces-waydroid.conf"
 #define LOG_PATH      "/ds-waydroid-boot.log"
@@ -353,6 +356,13 @@ static bool build_dev(bool want_emulation, bool *emulation_out)
     carry_prefixed(stage);
 
     char path[PATH_MAX];
+    /* Waydroid's hardware composer runs without root and creates its Wayland
+     * event FIFOs here. InputFlinger also needs the directory before it can
+     * watch for them. The tmpfs must start with only guest input devices. */
+    snprintf(path, sizeof(path), "%s/input", stage);
+    if (mkdir(path, 0755) < 0 || chown(path, 1000, 1000) < 0 || chmod(path, 0775) < 0)
+        WARN("/dev/input: cannot prepare the Waydroid input directory: %s", strerror(errno));
+
     snprintf(path, sizeof(path), "%s/console", stage);
     if (exists("/dev/console") && touch(path) == 0 &&
         mount("/dev/console", path, NULL, MS_BIND, NULL) < 0)
@@ -427,14 +437,161 @@ static bool hide_host_boot_parameters(void)
 /* Properties                                                                */
 /* ------------------------------------------------------------------------- */
 
+enum gpu_mode { GPU_AUTO, GPU_ON, GPU_OFF };
+
 struct settings {
     bool force_second_stage;
     bool keep_host_cmdline;
     bool ignore_errors;
     bool unprotected;
+    enum gpu_mode gpu_mode;
+    bool gpu_vulkan;
 };
 
-static void write_properties(void)
+/* ------------------------------------------------------------------------- */
+/* GPU                                                                       */
+/* ------------------------------------------------------------------------- */
+
+/* The Adreno driver files the builder adds to /vendor (waydroid/gpu/). */
+static const char *const gpu_files_64[] = {
+    "/vendor/lib64/egl/libEGL_kgsl.so", "/vendor/lib64/egl/libGLESv2_kgsl.so",
+    "/vendor/lib64/libgallium_kgsl.so", "/vendor/lib64/hw/gralloc.gbm.so", NULL
+};
+static const char *const gpu_files_32[] = {
+    "/vendor/lib/egl/libEGL_kgsl.so", "/vendor/lib/egl/libGLESv2_kgsl.so",
+    "/vendor/lib/libgallium_kgsl.so", "/vendor/lib/hw/gralloc.gbm.so", NULL
+};
+static const char *const dma_heaps[] = {
+    "/dev/dma_heap/system", "/dev/dma_heap/qcom,system", "/dev/ion", NULL
+};
+
+static bool image_needs_32bit(void);
+
+static bool can_open(const char *path, int flags)
+{
+    int fd = open(path, flags | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    close(fd);
+    return true;
+}
+
+static const char *missing_file(const char *const *files)
+{
+    for (int i = 0; files[i]; i++)
+        if (!exists(files[i]))
+            return files[i];
+    return NULL;
+}
+
+/* Android must be able to use the GPU from every app, not only as root. The
+ * nodes are our own copies when device nodes could be created, so widening
+ * their mode does not touch the phone's /dev. */
+static void open_up_gpu_nodes(void)
+{
+    if (!g_can_mknod)
+        return;
+    chmod("/dev/kgsl-3d0", 0666);
+    for (int i = 0; dma_heaps[i]; i++)
+        if (exists(dma_heaps[i]))
+            chmod(dma_heaps[i], 0444);
+}
+
+/* Decides whether Android draws with the Adreno GPU (Mesa freedreno on KGSL)
+ * or with the CPU (SwiftShader). Runs after /dev was rebuilt, so it sees the
+ * same devices Android will. */
+#define GPU_FAILED_PATH  "/data/ds-gpu-failed"
+#define GPU_CRASHES_PATH "/data/ds-gpu-crashes"
+
+static bool choose_gpu(const struct settings *st)
+{
+    /* Written by /system/etc/ds-gpu-guard.sh; counts crashes of this start. */
+    unlink(GPU_CRASHES_PATH);
+    /* Keep Android's log of the start before (ds-logcat.rc starts afresh). */
+    rename("/data/ds-waydroid-logcat.txt", "/data/ds-waydroid-logcat.previous.txt");
+    rename("/data/ds-waydroid-logcat.txt.1", "/data/ds-waydroid-logcat.previous.txt.1");
+
+    if (st->gpu_mode == GPU_OFF) {
+        INFO("gpu: turned off with gpu.mode=off; Android draws with the CPU");
+        return false;
+    }
+    if (st->gpu_mode == GPU_AUTO && exists(GPU_FAILED_PATH)) {
+        char why[256] = "";
+        FILE *f = fopen(GPU_FAILED_PATH, "r");
+        if (f) {
+            if (!fgets(why, sizeof(why), f))
+                why[0] = 0;
+            fclose(f);
+        }
+        WARN("gpu: the GPU driver failed before: %s", *why ? trim(why) : "(no details)");
+        WARN("gpu: Android draws with the CPU. Delete %s in the rootfs, or set gpu.mode=on,", GPU_FAILED_PATH);
+        WARN("gpu: to try the GPU again.");
+        return false;
+    }
+
+    const char *missing = missing_file(gpu_files_64);
+    if (!missing && image_needs_32bit())
+        missing = missing_file(gpu_files_32);
+    if (missing) {
+        INFO("gpu: %s is missing from this rootfs; Android draws with the CPU", missing);
+        return false;
+    }
+
+    open_up_gpu_nodes();
+    const char *problem = NULL;
+    if (!exists("/dev/kgsl-3d0"))
+        problem = "there is no /dev/kgsl-3d0 (a Snapdragon phone with Hardware Access "
+                  "turned on in the container settings is needed)";
+    else if (!can_open("/dev/kgsl-3d0", O_RDWR))
+        problem = "/dev/kgsl-3d0 cannot be opened";
+    else {
+        bool heap = false;
+        for (int i = 0; dma_heaps[i] && !heap; i++)
+            heap = can_open(dma_heaps[i], O_RDONLY);
+        if (!heap)
+            problem = "no dma-buf heap (/dev/dma_heap/system) or /dev/ion can be opened";
+    }
+
+    if (problem && st->gpu_mode == GPU_ON) {
+        WARN("gpu: %s, but gpu.mode=on uses the GPU driver anyway", problem);
+        return true;
+    }
+    if (problem) {
+        INFO("gpu: %s; Android draws with the CPU", problem);
+        return false;
+    }
+    INFO("gpu: Adreno GPU found; Android draws with the GPU (Mesa freedreno on KGSL)");
+    return true;
+}
+
+static bool config_has_key(const char *key)
+{
+    FILE *in = fopen(CONFIG_PATH, "r");
+    if (!in)
+        return false;
+    char line[1024];
+    size_t len = strlen(key);
+    bool found = false;
+    while (!found && fgets(line, sizeof(line), in)) {
+        char *s = trim(line);
+        found = !strncmp(s, key, len) && s[len] == '=';
+    }
+    fclose(in);
+    return found;
+}
+
+/* Writes "key=value" unless the config file sets the key itself. */
+static int default_property(FILE *out, const char *key, const char *value)
+{
+    if (config_has_key(key)) {
+        INFO("properties: %s is set in the config file, keeping that value", key);
+        return 0;
+    }
+    fprintf(out, "%s=%s\n", key, value);
+    return 1;
+}
+
+static void write_properties(const struct settings *st, bool gpu)
 {
     FILE *in = fopen(CONFIG_PATH, "r");
     FILE *out = fopen(PROP_PATH, "w");
@@ -448,29 +605,82 @@ static void write_properties(void)
                  "# Edit that file instead; changes here are overwritten.\n", CONFIG_PATH);
     int count = 0;
     bool memfd_set = false;
+    bool android_gpu = gpu;
+    int bridge_gpu = -1, render_scale = -1, ui_width_dp = 0;
+    int width = DEFAULT_DISPLAY_WIDTH, height = DEFAULT_DISPLAY_HEIGHT;
     if (in) {
         char line[1024];
         while (fgets(line, sizeof(line), in)) {
             char *s = trim(line);
-            if (!*s || *s == '#' || !strchr(s, '='))
+            char *eq = strchr(s, '=');
+            if (!*s || *s == '#' || !eq)
                 continue;
-            if (!strncmp(s, "bridge.", 7))
+            if (!strncmp(s, "bridge.", 7)) {
+                *eq = 0;
+                const char *key = trim(s + 7), *value = trim(eq + 1);
+                if (!strcmp(key, "default_width"))
+                    width = atoi(value);
+                else if (!strcmp(key, "default_height"))
+                    height = atoi(value);
+                else if (!strcmp(key, "ui_width_dp"))
+                    ui_width_dp = atoi(value);
+                else if (!strcmp(key, "render_scale"))
+                    render_scale = !strcmp(value, "auto") ? -1 : atoi(value);
+                else if (!strcmp(key, "gpu"))
+                    bridge_gpu = !strcmp(value, "auto") ? -1 : atoi(value) != 0;
                 continue;
-            if (!strncmp(s, "init.", 5))
+            }
+            if (!strncmp(s, "init.", 5) || !strncmp(s, "gpu.", 4))
                 continue;
             if (!strncmp(s, "sys.use_memfd=", 14))
                 memfd_set = true;
+            if (!strncmp(s, "ro.hardware.egl=", 16))
+                android_gpu = !strcmp(s + 16, "kgsl");
             fprintf(out, "%s\n", s);
             count++;
         }
         fclose(in);
     } else {
-        WARN("%s is missing, Android will start with its built-in defaults", CONFIG_PATH);
+        WARN("%s is missing; using default rootfs properties", CONFIG_PATH);
     }
-    /* Kernels without the old ashmem driver need Android to use memfd. */
-    if (!memfd_set && !exists("/dev/ashmem")) {
+
+    /* SurfaceFlinger caches this property in its constructor, before the
+     * Wayland composer asks the bridge to configure the first window. */
+    if (ui_width_dp > 0 && ui_width_dp <= 2000) {
+        if (width < 64 || width > 16384) width = DEFAULT_DISPLAY_WIDTH;
+        if (height < 64 || height > 16384) height = DEFAULT_DISPLAY_HEIGHT;
+        if (render_scale < 0) render_scale = (bridge_gpu < 0 ? android_gpu : bridge_gpu) ? 100 : 50;
+        if (render_scale < 10 || render_scale > 100) render_scale = 100;
+        uint32_t w = scaled_dim((uint32_t)width, render_scale);
+        uint32_t h = scaled_dim((uint32_t)height, render_scale);
+        char density[16];
+        snprintf(density, sizeof(density), "%d", display_density(w, h, ui_width_dp));
+        if (default_property(out, "ro.sf.lcd_density", density)) {
+            INFO("display density: %s dpi for %ux%u (%d dp target)", density, w, h, ui_width_dp);
+            count++;
+        }
+    }
+    /* Hardware mode can expose /dev/ashmem even when Android services cannot
+     * open it. Use memfd by default on both kinds of host. */
+    if (!memfd_set) {
         fprintf(out, "sys.use_memfd=true\n");
         count++;
+    }
+    /* How Android draws. The display bridge reads ro.hardware.egl from this
+     * file to pick its own defaults. */
+    if (gpu) {
+        count += default_property(out, "ro.hardware.gralloc", "gbm");
+        /* Waydroid's init replaces gralloc "gbm" with minigbm_gbm_mesa, which
+         * needs a DRM GPU (patch "init: Default to minigbm_gbm_mesa"). This
+         * keeps the dma-buf heap gralloc.gbm.so that works with KGSL. */
+        count += default_property(out, "gralloc.gbm.legacy", "true");
+        count += default_property(out, "ro.hardware.egl", "kgsl");
+        count += default_property(out, "mesa.loader.driver.override", "kgsl");
+        if (st->gpu_vulkan)
+            count += default_property(out, "ro.hardware.vulkan", "kgsl");
+    } else {
+        count += default_property(out, "ro.hardware.gralloc", "default");
+        count += default_property(out, "ro.hardware.egl", "swiftshader");
     }
     fchmod(fileno(out), 0644);
     fclose(out);
@@ -839,16 +1049,20 @@ static void exec_android_second_stage(void)
     if (g_log)
         fflush(g_log);
     int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-    int saved_err = dup(STDERR_FILENO);
+    int saved_err = -1;
     if (fd >= 0) {
+        saved_err = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
         dup2(fd, STDOUT_FILENO);
         dup2(fd, STDERR_FILENO);
         close(fd);
     }
     execve(ANDROID_INIT, argv, envp);
-    if (saved_err >= 0)
+    int exec_errno = errno;
+    if (saved_err >= 0) {
         dup2(saved_err, STDERR_FILENO);
-    FAIL("cannot execute %s: %s", ANDROID_INIT, strerror(errno));
+        close(saved_err);
+    }
+    FAIL("cannot execute %s: %s", ANDROID_INIT, strerror(exec_errno));
 }
 
 static void on_stop_signal(int signo)
@@ -951,7 +1165,8 @@ int main(int argc, char **argv)
 
     if (!check_only) {
         rename(LOG_PATH, OLD_LOG_PATH); /* keep the report of the boot before this one */
-        g_log = fopen(LOG_PATH, "w");
+        /* Zygote aborts if a non-allowlisted descriptor reaches it from init. */
+        g_log = fopen(LOG_PATH, "we");
     }
     INFO("ds-waydroid-init: preparing Android for Droidspaces");
     describe_environment();
@@ -1000,8 +1215,7 @@ int main(int argc, char **argv)
         WARN("/data: cannot make it a mount point: %s", strerror(errno));
 
     struct settings settings = { 0 };
-    /* The properties are written after /dev is rebuilt so the ashmem check
-     * sees what Android will see; read the init.* switches first. */
+    /* Read the init.* switches before rebuilding /dev. */
     FILE *cfg = fopen(CONFIG_PATH, "r");
     if (cfg) {
         char line[1024];
@@ -1015,6 +1229,12 @@ int main(int argc, char **argv)
                 settings.ignore_errors = true;
             else if (!strcmp(s, "init.unprotected=1"))
                 settings.unprotected = true;
+            else if (!strcmp(s, "gpu.mode=on"))
+                settings.gpu_mode = GPU_ON;
+            else if (!strcmp(s, "gpu.mode=off"))
+                settings.gpu_mode = GPU_OFF;
+            else if (!strcmp(s, "gpu.vulkan=1"))
+                settings.gpu_vulkan = true;
         }
         fclose(cfg);
     }
@@ -1031,7 +1251,8 @@ int main(int argc, char **argv)
     if (!dev_ok && !settings.ignore_errors)
         goto stuck;
 
-    write_properties();
+    bool gpu = choose_gpu(&settings);
+    write_properties(&settings, gpu);
 
     if (g_problems) {
         if (!settings.ignore_errors) {
