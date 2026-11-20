@@ -159,7 +159,7 @@ When reporting a problem, the easiest way is the Droidspaces app's **Generate a 
 Waydroid normally needs its Python tools and LXC on a Linux host. Here two small static programs take their place:
 
 - **`ds-waydroid-init`** (`/sbin/init`) builds a clean `/dev` with a private binder instance, hides the phone's kernel command line from the guest, chooses between GPU and CPU drawing, writes `/vendor/waydroid.prop` from the settings file and then executes Android's `/init`, which stays PID 1.
-- **`anland-waydroid-bridge`** is a minimal Wayland compositor. Waydroid's hardware composer is a Wayland client; the bridge accepts its frames (shared memory from the CPU path, linux-dmabuf from the GPU path), copies them into the buffer the Anland app selected and turns Anland input into Wayland input. It links Anland's `libdisplay_producer`, so the binary is GPL-3.0.
+- **`anland-waydroid-bridge`** is a minimal Wayland compositor. Waydroid's hardware composer is a Wayland client; the bridge accepts its frames (shared memory from the CPU path, linux-dmabuf from the GPU path), copies them into the buffer the Anland app selected and turns Anland input into Wayland input. It also answers as the PulseAudio server that Waydroid's audio HAL connects to (`/run/xdg/pulse/native`), mixes what Android plays and sends it over Anland's audio channel to the app's speaker. It links Anland's `libdisplay_producer`, so the binary is GPL-3.0.
 
 ### The GPU path
 
@@ -196,7 +196,7 @@ Rootfs archives built before this was added do not have these protections. Do no
 
 On an x86-64 Linux machine, with the scripts in `waydroid/tests/`:
 
-- `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks colours, scaling, input, late resolution changes, continuous presentation before the first Android frame and while Android holds a static frame, GPU-style dma-buf frames with padded rows, the GPU copy helper (the real one on Mesa's software renderer, and a stand-in for render fences and failures), and the `auto` settings for both drawing modes.
+- `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks colours, scaling, input, late resolution changes, continuous presentation before the first Android frame and while Android holds a static frame, GPU-style dma-buf frames with padded rows, the GPU copy helper (the real one on Mesa's software renderer, and a stand-in for render fences and failures), and the `auto` settings for both drawing modes. It also plays a tone through `aplay -D pulse` (the ALSA plugin Waydroid's audio HAL uses) and checks that it reaches the app whole, in real time, in pitch and at its volume.
 - `run-init-test.sh`: `ds-waydroid-init` inside a real Droidspaces container in default, hardware-access and privileged mode, with a stand-in that makes the same calls as Waydroid's first-stage init.
 - The ARM64 rootfs reached the home screen in Droidspaces under CPU emulation. Gallery, Files, bidirectional text clipboard, and an HTTPS test page through NAT were verified in Anland.
 

@@ -5,7 +5,10 @@
  * way the app offers its screen buffers, asks the producer for frames, saves
  * them as PPM pictures and injects a few touch and key events.
  *
- * Usage: fake-anland-app SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [idle]
+ * With AUDIO_OUT and SECONDS it also announces a 48 kHz stereo speaker on the
+ * audio channel, like the app does, and saves the sound it receives there.
+ *
+ * Usage: fake-anland-app SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [idle | AUDIO_OUT SECONDS]
  */
 #define _GNU_SOURCE
 #include <stdbool.h>
@@ -13,7 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <poll.h>
+#include <time.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 
 #include "display_consumer.h"
 
@@ -21,6 +27,53 @@
 
 static void connected(void *data) { *(bool *)data = true; }
 static void fell_back(void *data) { *(bool *)data = true; }
+
+static void send_audio_format(int fd, uint32_t role, uint32_t channels)
+{
+    struct { struct audio_msg h; struct audio_format f; } __attribute__((packed)) m = {
+        .h = { .type = AUDIO_MSG_FORMAT, .size = sizeof(struct audio_format) },
+        .f = { .rate = 48000, .channels = channels, .format = AUDIO_FORMAT_S16LE,
+               .role = role, .quantum = 0 },
+    };
+    send(fd, &m, sizeof(m), MSG_NOSIGNAL);
+}
+
+/* Saves every PCM message for the given time; returns the number of bytes. */
+static long record_audio(display_ctx *ctx, const char *path, double seconds)
+{
+    FILE *out = fopen(path, "wb");
+    if (!out)
+        return -1;
+    static uint8_t buf[65536 + 64];
+    long total = 0;
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double t = (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9;
+        if (t >= seconds)
+            break;
+        int fd = get_audio_fd(ctx);
+        if (fd < 0) {
+            usleep(10000);
+            continue;
+        }
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        if (poll(&p, 1, 20) <= 0)
+            continue;
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        if (n < (ssize_t)sizeof(struct audio_msg))
+            continue;
+        struct audio_msg h;
+        memcpy(&h, buf, sizeof(h));
+        if (h.type != AUDIO_MSG_PCM || h.size > n - sizeof(h))
+            continue;
+        fwrite(buf + sizeof(h), 1, h.size, out);
+        total += h.size;
+    }
+    fclose(out);
+    return total;
+}
 
 static void save_ppm(const char *path, const uint8_t *px, uint32_t w, uint32_t h, uint32_t stride)
 {
@@ -37,7 +90,8 @@ static void save_ppm(const char *path, const uint8_t *px, uint32_t w, uint32_t h
 int main(int argc, char **argv)
 {
     if (argc < 6) {
-        fprintf(stderr, "usage: %s SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [idle]\n", argv[0]);
+        fprintf(stderr, "usage: %s SOCKET WIDTH HEIGHT FRAMES OUTPUT_PREFIX [idle | AUDIO_OUT SECONDS]\n",
+                argv[0]);
         return 2;
     }
     const char *sock = argv[1];
@@ -81,6 +135,29 @@ int main(int argc, char **argv)
     push_dmabufs(ctx, fds, infos, NBUF);
     printf("fake-app: connected, offering %d buffers of %ux%u\n", NBUF, w, h);
     fflush(stdout);
+
+    if (argc >= 8) {
+        /* Asking for a frame makes the app leave its fallback state; from then
+         * on the audio channel exists. No frame is waited for: without a
+         * composer none comes, and waiting would put the app back in fallback. */
+        for (int i = 0; i < 200 && get_audio_fd(ctx) < 0; i++) {
+            select_dmabuf(ctx, 0);
+            if (get_audio_fd(ctx) < 0)
+                usleep(10000);
+        }
+        if (get_audio_fd(ctx) < 0) {
+            fprintf(stderr, "fake-app: no audio channel\n");
+            return 1;
+        }
+        send_audio_format(get_audio_fd(ctx), AUDIO_ROLE_PLAYBACK, 2);
+        send_audio_format(get_audio_fd(ctx), AUDIO_ROLE_CAPTURE, 1);
+        printf("fake-app: speaker announced, listening\n");
+        fflush(stdout);
+        long bytes = record_audio(ctx, argv[6], atof(argv[7]));
+        printf("fake-app: received %ld bytes of sound\n", bytes);
+        disconnect(ctx);
+        return bytes > 0 ? 0 : 1;
+    }
 
     int got = 0, fences = 0;
     bool copied = false;

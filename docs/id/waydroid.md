@@ -159,7 +159,7 @@ Saat melaporkan masalah, cara termudah adalah **Generate a bug report** di aplik
 Waydroid biasanya butuh alat Python-nya dan LXC di host Linux. Di sini dua program statis kecil menggantikannya:
 
 - **`ds-waydroid-init`** (`/sbin/init`) membuat `/dev` yang bersih dengan instance binder privat, menyembunyikan command line kernel ponsel dari Android tamu, memilih antara penggambaran GPU dan CPU, menulis `/vendor/waydroid.prop` dari berkas pengaturan, lalu menjalankan `/init` milik Android yang tetap menjadi PID 1.
-- **`anland-waydroid-bridge`** adalah compositor Wayland minimal. Hardware composer Waydroid adalah klien Wayland; jembatan ini menerima frame-nya (shared memory dari jalur CPU, linux-dmabuf dari jalur GPU), menyalinnya ke buffer yang dipilih aplikasi Anland, dan mengubah input Anland menjadi input Wayland. Program ini memakai `libdisplay_producer` milik Anland, jadi binernya berlisensi GPL-3.0.
+- **`anland-waydroid-bridge`** adalah compositor Wayland minimal. Hardware composer Waydroid adalah klien Wayland; jembatan ini menerima frame-nya (shared memory dari jalur CPU, linux-dmabuf dari jalur GPU), menyalinnya ke buffer yang dipilih aplikasi Anland, dan mengubah input Anland menjadi input Wayland. Ia juga berperan sebagai server PulseAudio yang disambungi HAL audio Waydroid (`/run/xdg/pulse/native`), mencampur suara yang diputar Android, lalu mengirimnya lewat kanal audio Anland ke speaker aplikasi. Program ini memakai `libdisplay_producer` milik Anland, jadi binernya berlisensi GPL-3.0.
 
 ### Jalur GPU
 
@@ -196,7 +196,7 @@ Arsip rootfs yang dibangun sebelum ini ditambahkan tidak punya perlindungan ters
 
 Di mesin Linux x86-64, dengan skrip di `waydroid/tests/`:
 
-- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna, penskalaan, input, pergantian ukuran saat Anland tersambung belakangan, kelancaran koneksi sebelum frame pertama dan saat layar Android diam, frame dma-buf ala GPU dengan baris berpadding, helper penyalin GPU (helper asli di renderer software Mesa, dan tiruan untuk fence dan kegagalan), serta pengaturan `auto` untuk kedua mode penggambaran.
+- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna, penskalaan, input, pergantian ukuran saat Anland tersambung belakangan, kelancaran koneksi sebelum frame pertama dan saat layar Android diam, frame dma-buf ala GPU dengan baris berpadding, helper penyalin GPU (helper asli di renderer software Mesa, dan tiruan untuk fence dan kegagalan), serta pengaturan `auto` untuk kedua mode penggambaran. Tes ini juga memutar nada lewat `aplay -D pulse` (plugin ALSA yang dipakai HAL audio Waydroid) dan memeriksa nada itu sampai ke aplikasi utuh, tepat waktu, dengan nada dan volume yang benar.
 - `run-init-test.sh`: `ds-waydroid-init` di dalam container Droidspaces sungguhan pada mode biasa, akses hardware, dan privileged, dengan tiruan yang melakukan pemanggilan yang sama seperti init tahap pertama Waydroid.
 - Rootfs ARM64 asli mencapai home screen di Droidspaces lewat emulasi CPU. Gallery, Files, clipboard teks dua arah, dan halaman HTTPS uji melalui NAT terlihat berfungsi di Anland.
 

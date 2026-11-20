@@ -3,7 +3,8 @@
 #
 # Runs the real Anland display daemon, a stand-in for the Anland app and a
 # stand-in for the Waydroid composer, and checks that pictures and input make
-# it through the bridge in both directions.
+# it through the bridge in both directions, and that sound played by a
+# PulseAudio client reaches the app.
 #
 # Usage: run-bridge-test.sh TOOLS_DIR [WORK_DIR]
 #   TOOLS_DIR  output of ../build-tools.sh (native build)
@@ -233,6 +234,61 @@ for frame in 383 384 385; do
   check "the last Android frame survives in buffer $(((frame - 1) % 3))" check_picture "$d/frame-$frame.ppm" 160 240
 done
 SCENARIO_DIR="$d"
+
+# 4. Sound: a PulseAudio client plays through the bridge to the app's speaker.
+# aplay's "pulse" device is the same ALSA plugin Waydroid's audio HAL uses.
+if command -v aplay >/dev/null && aplay -L 2>/dev/null | grep -qx pulse; then
+  d="$T/sound"; mkdir -p "$d/xdg"
+  echo "== sound"
+  python3 - "$d/tone.raw" <<'PY'
+import math, struct, sys
+rate = 44100
+with open(sys.argv[1], 'wb') as f:
+    for i in range(rate * 2):
+        v = int(8000 * math.sin(2 * math.pi * 440 * i / rate))
+        f.write(struct.pack('<hh', v, v))
+PY
+  "$T/display_daemon" "$d/display.sock" >"$d/daemon.log" 2>&1 & dpid=$!; PIDS+=("$dpid")
+  sleep 0.3
+  "$BRIDGE" --anland_socket "$d/display.sock" --runtime_dir "$d/xdg" --log "$d/bridge.log" \
+    --pulse_socket "$d/xdg/pulse/native" --verbose 1 >"$d/bridge.out" 2>&1 & bpid=$!; PIDS+=("$bpid")
+  sleep 0.3
+  "$T/fake-app" "$d/display.sock" 320 480 0 "$d/frame" "$d/received.raw" 4 >"$d/app.log" 2>&1 & apid=$!
+  PIDS+=("$apid")
+  sleep 1
+  start=$(date +%s%N)
+  play_rc=0
+  PULSE_RUNTIME_PATH="$d/xdg/pulse" HOME="$d" timeout 20 \
+    aplay -q -D pulse -t raw -f S16_LE -r 44100 -c 2 "$d/tone.raw" >"$d/aplay.log" 2>&1 || play_rc=$?
+  took_ms=$(( ($(date +%s%N) - start) / 1000000 ))
+  app_rc=0; wait "$apid" || app_rc=$?
+  kill "$bpid" "$dpid" 2>/dev/null || true
+  wait "$bpid" "$dpid" 2>/dev/null || true
+  check "the ALSA pulse plugin plays through the bridge" test "$play_rc" -eq 0
+  check "playback runs in real time (2 s of sound took ${took_ms} ms)" test "$took_ms" -ge 1900 -a "$took_ms" -le 3500
+  check "the stand-in app received sound" test "$app_rc" -eq 0
+  check "the app's speaker format was used" grep -q "Anland app plays sound at 48000 Hz, 2 channel" "$d/bridge.log"
+  check "the tone arrives whole, in pitch and at its volume" python3 - "$d/received.raw" <<'PY'
+import struct, sys
+data = open(sys.argv[1], 'rb').read()
+n = len(data) // 4
+s = struct.unpack('<%dh' % (2 * n), data[:4 * n])
+left, right = s[0::2], s[1::2]
+assert left == right, "left and right differ"
+loud = [i for i, v in enumerate(left) if abs(v) > 100]
+assert loud, "only silence arrived"
+span = (loud[-1] - loud[0]) / 48000
+assert 1.95 <= span <= 2.05, f"tone lasted {span:.3f} s, expected 2 s at 48 kHz"
+seg = left[loud[0] + 4800:loud[0] + 4800 + 48000]
+crossings = sum(1 for a, b in zip(seg, seg[1:]) if a < 0 <= b)
+assert 435 <= crossings <= 445, f"tone is {crossings} Hz, expected 440"
+assert 7600 <= max(seg) <= 8400, f"peak is {max(seg)}, expected about 8000"
+PY
+  SCENARIO_DIR="$d"
+else
+  echo "== sound"
+  echo "  skip  aplay with the ALSA pulse plugin is not installed (alsa-utils, libasound2-plugins)"
+fi
 
 if [[ "$FAILED" -ne 0 ]]; then
   echo

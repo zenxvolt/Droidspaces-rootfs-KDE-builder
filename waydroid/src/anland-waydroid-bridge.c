@@ -22,6 +22,10 @@
  * (waydroid/src/gpu-copy-protocol.h); without the helper it falls back to the
  * CPU.
  *
+ * It also answers as the PulseAudio server Waydroid's audio HAL connects to
+ * (pulse-server.c) and sends the mixed sound over Anland's audio channel, so
+ * Android plays through the Anland app like a Linux desktop on Anland does.
+ *
  * The file itself is MIT licensed like the rest of this repository. The binary
  * links Anland's libdisplay_producer (GPL-3.0), so the resulting executable is
  * distributed under GPL-3.0.
@@ -58,6 +62,7 @@
 #include "anland-clipboard.h"
 #include "display-geometry.h"
 #include "gpu-copy-protocol.h"
+#include "pulse-server.h"
 
 /* ------------------------------------------------------------------------- */
 /* Small helpers                                                             */
@@ -97,9 +102,9 @@ struct bridge_dma_buf_sync { uint64_t flags; };
 #define BTN_LEFT_CODE 0x110
 
 static FILE *g_log_file;
-static int g_verbose;
+int g_verbose;
 
-static void logmsg(const char *level, const char *fmt, ...)
+void logmsg(const char *level, const char *fmt, ...)
 {
     char line[1024];
     va_list ap;
@@ -156,6 +161,7 @@ struct config {
     char gpu_copy_helper[PATH_MAX];
     int wait_for_display_ms; /* hold the first configure this long for a real size */
     int ui_width_dp;         /* pick the Android density so the short side is this many dp */
+    char pulse_socket[PATH_MAX]; /* where Android's audio looks for PulseAudio; "off" = none */
 };
 
 struct target {
@@ -239,6 +245,13 @@ struct bridge {
     uint64_t last_delivered_serial, session_serial;
     uint64_t next_sample_ms, last_stats_ms, last_frames;
     int kgsl_open; /* 0 = not checked, 1 = accessible, -1 = unavailable */
+
+    /* Sound */
+    struct pulse_server *pulse;
+    struct wl_event_source *audio_source;
+    int audio_fd;                  /* Anland audio channel, -1 without a session */
+    uint64_t audio_sent, audio_dropped;
+
 };
 
 static void maybe_present(struct bridge *b);
@@ -1084,6 +1097,8 @@ static void set_client_display(struct bridge *b, uint32_t w, uint32_t h, uint32_
 static void session_teardown(struct bridge *b)
 {
     anland_clipboard_cancel_receive(b->clipboard);
+    if (b->audio_source) { wl_event_source_remove(b->audio_source); b->audio_source = NULL; }
+    b->audio_fd = -1;
     if (b->ready_source) { wl_event_source_remove(b->ready_source); b->ready_source = NULL; }
     if (b->data_source) { wl_event_source_remove(b->data_source); b->data_source = NULL; }
     for (int i = 0; i < b->target_count; i++) {
@@ -1262,6 +1277,76 @@ static bool target_layout_valid(const struct buf_info *info)
             info->format == AHB_FORMAT_RGBA_1010102);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Sound                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/* The Anland app tells the producer which format its speaker runs at (one
+ * AUDIO_MSG_FORMAT per direction) and sends microphone PCM, which is not used
+ * yet. */
+static int on_audio(int fd, uint32_t mask, void *data)
+{
+    struct bridge *b = data;
+    uint8_t buf[64 * 1024];
+    for (;;) {
+        ssize_t n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            break;
+        if ((size_t)n < sizeof(struct audio_msg))
+            continue;
+        struct audio_msg h;
+        memcpy(&h, buf, sizeof(h));
+        if (h.type != AUDIO_MSG_FORMAT || h.size != sizeof(struct audio_format) ||
+            (size_t)n < sizeof(h) + sizeof(struct audio_format))
+            continue;
+        struct audio_format f;
+        memcpy(&f, buf + sizeof(h), sizeof(f));
+        if (f.role != AUDIO_ROLE_PLAYBACK)
+            continue;
+        if (f.format != AUDIO_FORMAT_S16LE) {
+            WARN("Anland app asks for audio sample format %u, only 16-bit is supported", f.format);
+            continue;
+        }
+        INFO("Anland app plays sound at %u Hz, %u channel(s)", f.rate, f.channels);
+        pulse_server_set_output_format(b->pulse, f.rate, f.channels);
+        /* The app keeps up to this many frames queued before its speaker. */
+        if (f.quantum && f.rate)
+            pulse_server_set_output_latency_us(b->pulse, 20000 + (uint64_t)f.quantum * 1000000 / f.rate);
+    }
+    if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
+        /* The session itself notices the loss; just stop watching. */
+        wl_event_source_remove(b->audio_source);
+        b->audio_source = NULL;
+        b->audio_fd = -1;
+    }
+    return 0;
+}
+
+/* Mixed sound from Android, about every 10 ms while something plays. Without
+ * the Anland app it is dropped, so Android's timing keeps running. */
+static void on_pcm(void *data, const int16_t *pcm, size_t frames, uint32_t channels)
+{
+    struct bridge *b = data;
+    if (!b->session || b->audio_fd < 0)
+        return;
+    struct audio_msg h = { .type = AUDIO_MSG_PCM,
+                           .size = (uint32_t)(frames * channels * sizeof(int16_t)) };
+    struct iovec iov[2] = {
+        { .iov_base = &h, .iov_len = sizeof(h) },
+        { .iov_base = (void *)pcm, .iov_len = h.size },
+    };
+    struct msghdr m = { .msg_iov = iov, .msg_iovlen = 2 };
+    if (sendmsg(b->audio_fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL) < 0) {
+        if (b->audio_dropped++ == 0)
+            WARN("Anland audio channel does not take sound: %s", strerror(errno));
+        return;
+    }
+    if (b->audio_sent++ == 0)
+        INFO("sound from Android is going to the Anland app");
+}
+
 static bool session_start(struct bridge *b)
 {
     int count = get_buf_count(b->ctx);
@@ -1324,6 +1409,12 @@ static bool session_start(struct bridge *b)
     }
     INFO("Anland app connected: %d buffers of %ux%u, stride %u, format %u, %u mHz",
          count, info->width, info->height, info->stride, info->format, refresh);
+    b->audio_fd = get_audio_fd(b->ctx);
+    if (b->audio_fd >= 0 && b->pulse)
+        b->audio_source = wl_event_loop_add_fd(b->loop, b->audio_fd, WL_EVENT_READABLE,
+                                               on_audio, b);
+    else if (b->audio_fd < 0)
+        WARN("this Anland app offers no audio channel; Android will be silent");
 
     b->size_from_display = true;
     set_client_display(b, scaled_dim(b->screen_w, b->cfg.render_scale),
@@ -2284,6 +2375,8 @@ static void config_set(struct config *c, const char *key, const char *value)
         c->wait_for_display_ms = atoi(value) * 1000;
     else if (!strcmp(key, "ui_width_dp"))
         c->ui_width_dp = atoi(value);
+    else if (!strcmp(key, "pulse_socket"))
+        snprintf(c->pulse_socket, sizeof(c->pulse_socket), "%s", value);
     else if (!strcmp(key, "verbose"))
         g_verbose = atoi(value);
 }
@@ -2370,6 +2463,8 @@ static void usage(const char *argv0)
         "  --gpu_copy_helper PATH the helper that does it (default " DEFAULT_GPU_COPY_HELPER ")\n"
         "  --wait_for_display S   seconds to wait for the Anland app before using the default size\n"
         "  --ui_width_dp N        choose Android's density so the short screen side is N dp (0 = off)\n"
+        "  --pulse_socket PATH    PulseAudio socket for Android's sound (default\n"
+        "                         <runtime_dir>/pulse/native, \"off\" for none)\n"
         "  --log FILE             also write messages to FILE\n"
         "  --benchmark_path PATH  prefix for the on-demand benchmark files\n"
         "  --verbose 1            extra messages\n", argv0);
@@ -2394,6 +2489,7 @@ int main(int argc, char **argv)
     snprintf(c->gpu_copy_helper, sizeof(c->gpu_copy_helper), "%s", DEFAULT_GPU_COPY_HELPER);
     c->wait_for_display_ms = 20000;
     c->ui_width_dp = 0;
+    b->audio_fd = -1;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
@@ -2413,6 +2509,9 @@ int main(int argc, char **argv)
     }
     config_resolve_auto(c);
     config_clamp(c);
+    /* Matches waydroid.pulse_runtime_path (<runtime_dir>/pulse) by default. */
+    if (!c->pulse_socket[0])
+        snprintf(c->pulse_socket, sizeof(c->pulse_socket), "%s/pulse/native", c->runtime_dir);
 
     if (c->log_path[0]) {
         /* Keep the report of the start before (a failed GPU start is often
@@ -2483,6 +2582,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (c->pulse_socket[0] && strcmp(c->pulse_socket, "off") != 0) {
+        b->pulse = pulse_server_new(b->loop, c->pulse_socket, on_pcm, b);
+        if (b->pulse)
+            INFO("sound: PulseAudio socket for Android at %s", c->pulse_socket);
+        else
+            WARN("sound: cannot create the PulseAudio socket %s: %s; Android will be silent",
+                 c->pulse_socket, strerror(errno));
+    }
+
     wl_event_loop_add_signal(b->loop, SIGTERM, on_signal, b);
     wl_event_loop_add_signal(b->loop, SIGINT, on_signal, b);
     b->tick = wl_event_loop_add_timer(b->loop, on_tick, b);
@@ -2504,6 +2612,7 @@ int main(int argc, char **argv)
         session_teardown(b);
         disconnect(b->ctx);
     }
+    pulse_server_destroy(b->pulse);
     wl_display_destroy_clients(b->display);
     anland_clipboard_destroy(b->clipboard);
     wl_display_destroy(b->display);
