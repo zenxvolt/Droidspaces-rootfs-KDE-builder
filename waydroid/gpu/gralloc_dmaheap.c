@@ -254,8 +254,13 @@ static size_t buffer_size(int format, int width, int height, int stride_bytes)
         return (size_t)stride_bytes * height + (size_t)stride_bytes * ((height + 1) / 2);
     case HAL_PIXEL_FORMAT_BLOB:
         return (size_t)width;
-    default:
-        return (size_t)stride_bytes * height;
+    default: {
+        /* Freedreno's A6xx and later import layout includes complete 16x4
+         * GMEM blit blocks. Back the final block without changing the logical
+         * height recorded in the handle or exposed to Android. */
+        size_t rows = ((size_t)height + 3) & ~(size_t)3;
+        return (size_t)stride_bytes * rows;
+    }
     }
 }
 
