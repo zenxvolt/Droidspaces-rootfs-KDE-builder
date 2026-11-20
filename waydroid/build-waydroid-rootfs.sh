@@ -9,6 +9,7 @@
 #   + /sbin/init                          (ds-waydroid-init, prepares the container)
 #   + /system/bin/anland-waydroid-bridge  (display bridge to Anland)
 #   + /system/etc/droidspaces-waydroid.conf
+#   + /system/bin/ds-waydroid-diag        (network and sound report for bug reports)
 #
 # Must run as root on Linux (it loop-mounts the Android images).
 #
@@ -248,6 +249,7 @@ chmod 0644 "$ROOTFS/system/etc/droidspaces"
 install -d -m 0755 -o 0 -g 0 "$ROOTFS/sbin"
 install -m 0755 -o 0 -g 0 "$TOOLS_DIR/ds-waydroid-init" "$ROOTFS/sbin/init"
 install -m 0755 -o 0 -g 2000 "$TOOLS_DIR/anland-waydroid-bridge" "$ROOTFS/system/bin/anland-waydroid-bridge"
+install -m 0755 -o 0 -g 2000 "$SCRIPT_DIR/rootfs/ds-waydroid-diag" "$ROOTFS/system/bin/ds-waydroid-diag"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/anland-bridge.rc" "$ROOTFS/system/etc/init/anland-bridge.rc"
 install -m 0644 -o 0 -g 0 "$SCRIPT_DIR/rootfs/droidspaces-waydroid.conf" "$ROOTFS/system/etc/droidspaces-waydroid.conf"
 

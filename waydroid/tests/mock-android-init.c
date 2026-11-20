@@ -113,6 +113,10 @@ int main(int argc, char **argv)
      * asking whether a write would be allowed is enough. */
     fprintf(out, "can change kernel settings (/proc/sys): %s\n",
             access("/proc/sys/kernel/sysrq", W_OK) == 0 ? "YES" : "no");
+    /* Android's network stack must be able to change these (they belong to
+     * the container's own network namespace), or it never brings eth0 up. */
+    fprintf(out, "can change network settings (/proc/sys/net): %s\n",
+            access("/proc/sys/net/ipv4/tcp_fwmark_accept", W_OK) == 0 ? "YES" : "no");
     fprintf(out, "can trigger sysrq: %s\n",
             access("/proc/sysrq-trigger", W_OK) == 0 ? "YES" : "no");
     fprintf(out, "can write to /sys: %s\n", access("/sys/kernel", W_OK) == 0 ? "YES" : "no");

@@ -1,0 +1,59 @@
+#!/system/bin/sh
+# Collects what is needed to find out why Android has no network or no sound.
+#
+# Run it as root in a shell inside the running container:
+#   ds-waydroid-diag
+# The report is written to /ds-waydroid-diag.txt in the rootfs. Send that file
+# along with /ds-waydroid-boot.log when asking for help.
+
+OUT=/ds-waydroid-diag.txt
+
+section() { echo; echo "===== $* ====="; }
+run() { echo "\$ $*"; "$@" 2>&1; }
+
+{
+  echo "ds-waydroid-diag, $(date)"
+  cat /system/etc/droidspaces-waydroid-release 2>/dev/null
+
+  section "Boot report"
+  grep -E "WARNING|ERROR|network|sound|protect" /ds-waydroid-boot.log 2>/dev/null
+
+  section "Network: interfaces and addresses"
+  run ip addr
+  run ip -4 rule
+  run ip -4 route show table all
+  run ip -6 route show table all
+
+  section "Network: kernel settings Android needs to write"
+  for f in /proc/sys/net/ipv4/tcp_fwmark_accept /proc/sys/net/ipv6/conf/eth0/use_tempaddr \
+           /proc/sys/net/ipv6/conf/eth0/accept_ra; do
+    if [ -w "$f" ]; then echo "writable  $f"; else echo "READ-ONLY $f"; fi
+  done
+
+  section "Network: what Android thinks"
+  run getprop sys.boot_completed
+  run dumpsys ethernet
+  run dumpsys connectivity --short
+  dumpsys connectivity 2>&1 | grep -iE "NetworkAgentInfo|validated|Active default network|DNS" | head -40
+
+  section "Network: reachability (as root)"
+  run ping -c 2 -W 3 1.1.1.1
+  run ping -c 2 -W 3 connectivitycheck.gstatic.com
+
+  section "Sound"
+  run getprop waydroid.pulse_runtime_path
+  run ls -l /run/xdg/pulse/
+  run ls -l /tmp/.pulse-socket
+  dumpsys media.audio_flinger 2>&1 | head -60
+
+  section "Recent system log: network"
+  logcat -d -b main -b system 2>&1 | grep -iE "Ethernet|IpClient|DhcpClient|NetworkMonitor|netd|ConnectivityService" | tail -150
+
+  section "Recent system log: sound and media"
+  logcat -d -b main -b system 2>&1 | grep -iE "audio|pulse|AudioFlinger|MediaCodec|Codec2|ExoPlayer|MediaPlayer" | tail -150
+
+  section "Recent crashes"
+  logcat -d -b crash 2>&1 | tail -80
+} > "$OUT" 2>&1
+
+echo "Report written to $OUT (inside the rootfs)."

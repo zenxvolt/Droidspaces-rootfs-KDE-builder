@@ -24,8 +24,9 @@ Droidspaces container
 | Keyboard | Hardware keys are forwarded. Use Android's own on-screen keyboard for typing. |
 | Mouse | A left click or drag is delivered as a finger tap or swipe. No pointer, no wheel. |
 | GPU acceleration | Not available yet. |
-| Sound, camera, sensors, clipboard | Not available. |
-| Network | Uses the Droidspaces container network. Not confirmed. |
+| Sound | Through the PulseAudio server Droidspaces runs in Termux (**Configure PulseAudio**, see below). |
+| Camera, sensors, clipboard | Not available. |
+| Network | Droidspaces' NAT network; Android gets its address by DHCP like on a Waydroid host. |
 
 ## Requirements
 
@@ -55,7 +56,8 @@ sudo ./waydroid/build-waydroid-rootfs.sh
    - turn **Anland Display** on;
    - turn **privileged mode** on with `nocaps` and `noseccomp`;
    - turn **SELinux permissive** on;
-   - keep the network on **NAT**;
+   - keep the network on **NAT** (in host mode Android would rewrite the phone's routing, so it gets no network there);
+   - for sound, turn **Configure PulseAudio** on. It needs Termux with Droidspaces' one-time setup script, described in Droidspaces' [Display, audio and desktop](https://github.com/ravindu644/Droidspaces-OSS/blob/main/Documentation/Graphics-and-Audio.md#one-time-setup-on-android) guide;
    - leave the init program at its default (`/sbin/init`).
 3. Start the container, then use **Launch Anland**.
 
@@ -96,7 +98,7 @@ Three places hold the answer, in the order things happen:
 | `dmesg` on the phone (as root) | Android's own early messages, lines starting with `init:`. Lines starting with `anland-bridge` are the display bridge. |
 | `/ds-waydroid-bridge.log` in the rootfs | The display bridge: whether the Anland app connected and at what size. |
 
-Once Android is up, `logcat` works from a shell in the container.
+Once Android is up, `logcat` works from a shell in the container. For network or sound problems, run `ds-waydroid-diag` in that shell: it writes `/ds-waydroid-diag.txt` in the rootfs with the addresses, routes, what Android's network service decided, the sound setup and the matching `logcat` lines. Send it along with `/ds-waydroid-boot.log`.
 
 | Message | Meaning |
 | --- | --- |
@@ -105,6 +107,10 @@ Once Android is up, `logcat` works from a shell in the container.
 | `Android was started 5 times within three minutes` | Android keeps rebooting. The cause is in `dmesg`. Starting was paused to save the battery; start the container again to retry. |
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** is off for this container. |
 | `cannot map Anland buffer` | This phone's screen buffers cannot be written by the CPU, which this bridge needs. |
+| `network: there is no eth0` | The container has no network of its own. Set the network mode to **NAT**. |
+| `network: the container shares the phone's network` | The network mode is host. Set it to **NAT**. |
+| `/proc/sys/net is read-only` | Android cannot bring its network up. Include this report when asking for help. |
+| `sound: no PulseAudio socket` | **Configure PulseAudio** is off, or PulseAudio in Termux did not start (see the container log in the Droidspaces app). Android runs without sound. Music and video apps may also refuse to play, because they wait for an audio output. |
 
 When reporting a problem, the easiest way is the Droidspaces app's **Generate a bug report**. It writes one archive to the phone's storage with the container log (which holds the `/sbin/init` report), the kernel log, and the kernel's record of the last crash if the phone restarted.
 
@@ -123,7 +129,7 @@ Android's boot scripts assume they own the machine. They tune the scheduler and 
 
 `/sbin/init` therefore rebuilds LXC's protections before it starts Android:
 
-- `/proc/sys`, `/proc/sysrq-trigger` and `/sys` are read-only for Android;
+- `/proc/sys`, `/proc/sysrq-trigger` and `/sys` are read-only for Android. The exception is `/proc/sys/net`, as with LXC: it holds only the settings of the container's own network, and Android needs to write them to bring its network up (builds before this was fixed had no network in apps);
 - Android gets a cgroup subtree of its own, so it cannot see or rewrite the phone's `top-app`, `background` and other groups;
 - the capabilities are reduced to the set Waydroid's LXC configuration keeps (no kernel modules, no raw hardware access).
 

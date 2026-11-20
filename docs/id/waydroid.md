@@ -24,8 +24,9 @@ Container Droidspaces
 | Keyboard | Tombol fisik diteruskan. Untuk mengetik, pakai keyboard layar milik Android. |
 | Mouse | Klik kiri atau seret diteruskan sebagai ketukan atau usapan jari. Tidak ada kursor dan roda gulir. |
 | Akselerasi GPU | Belum ada. |
-| Suara, kamera, sensor, clipboard | Belum ada. |
-| Jaringan | Memakai jaringan container Droidspaces. Belum terbukti. |
+| Suara | Lewat server PulseAudio yang dijalankan Droidspaces di Termux (**Configure PulseAudio**, lihat di bawah). |
+| Kamera, sensor, clipboard | Belum ada. |
+| Jaringan | Jaringan NAT Droidspaces; Android mendapat alamat lewat DHCP seperti di host Waydroid biasa. |
 
 ## Syarat
 
@@ -55,7 +56,8 @@ sudo ./waydroid/build-waydroid-rootfs.sh
    - nyalakan **Anland Display**;
    - nyalakan **mode privileged** dengan `nocaps` dan `noseccomp`;
    - nyalakan **SELinux permissive**;
-   - biarkan jaringan di **NAT**;
+   - biarkan jaringan di **NAT** (di mode host Android akan mengubah routing ponsel, jadi di sana Android tidak diberi jaringan);
+   - untuk suara, nyalakan **Configure PulseAudio**. Ini butuh Termux yang sudah menjalankan skrip setup sekali-jalan dari Droidspaces, dijelaskan di panduan [Display, audio and desktop](https://github.com/ravindu644/Droidspaces-OSS/blob/main/Documentation/Graphics-and-Audio.md#one-time-setup-on-android) milik Droidspaces;
    - biarkan program init pada bawaannya (`/sbin/init`).
 3. Jalankan container, lalu tekan **Launch Anland**.
 
@@ -96,7 +98,7 @@ Jawabannya ada di tiga tempat, sesuai urutan kejadian:
 | `dmesg` di ponsel (sebagai root) | Pesan awal dari Android sendiri, baris berawalan `init:`. Baris berawalan `anland-bridge` berasal dari jembatan tampilan. |
 | `/ds-waydroid-bridge.log` di dalam rootfs | Jembatan tampilan: apakah aplikasi Anland tersambung dan pada ukuran berapa. |
 
-Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container.
+Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container. Untuk masalah jaringan atau suara, jalankan `ds-waydroid-diag` di shell itu: ia menulis `/ds-waydroid-diag.txt` di dalam rootfs berisi alamat, rute, keputusan layanan jaringan Android, susunan suara, dan baris `logcat` yang relevan. Kirimkan bersama `/ds-waydroid-boot.log`.
 
 | Pesan | Arti |
 | --- | --- |
@@ -105,6 +107,10 @@ Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container.
 | `Android was started 5 times within three minutes` | Android terus-menerus restart. Penyebabnya ada di `dmesg`. Penyalaan dihentikan sementara untuk menghemat baterai; jalankan container lagi untuk mencoba ulang. |
 | `cannot reach the Anland daemon at /run/display.sock` | **Anland Display** mati untuk container ini. |
 | `cannot map Anland buffer` | Buffer layar ponsel ini tidak bisa ditulis oleh CPU, padahal jembatan ini membutuhkannya. |
+| `network: there is no eth0` | Container tidak punya jaringan sendiri. Setel mode jaringan ke **NAT**. |
+| `network: the container shares the phone's network` | Mode jaringan adalah host. Setel ke **NAT**. |
+| `/proc/sys/net is read-only` | Android tidak bisa menyalakan jaringannya. Sertakan laporan ini saat meminta bantuan. |
+| `sound: no PulseAudio socket` | **Configure PulseAudio** mati, atau PulseAudio di Termux tidak menyala (lihat log container di aplikasi Droidspaces). Android berjalan tanpa suara. Aplikasi musik dan video juga bisa menolak memutar karena menunggu keluaran audio. |
 
 Saat melaporkan masalah, cara termudah adalah **Generate a bug report** di aplikasi Droidspaces. Ia menulis satu arsip ke penyimpanan ponsel berisi log container (yang memuat laporan `/sbin/init`), log kernel, dan catatan kernel tentang crash terakhir bila ponsel sempat restart.
 
@@ -123,7 +129,7 @@ Skrip boot Android menganggap dirinya pemilik mesin. Ia menyetel penjadwal dan p
 
 Karena itu `/sbin/init` membangun ulang perlindungan LXC sebelum menjalankan Android:
 
-- `/proc/sys`, `/proc/sysrq-trigger`, dan `/sys` hanya-baca bagi Android;
+- `/proc/sys`, `/proc/sysrq-trigger`, dan `/sys` hanya-baca bagi Android. Pengecualiannya `/proc/sys/net`, sama seperti LXC: isinya hanya pengaturan jaringan milik container sendiri, dan Android harus menulisnya untuk menyalakan jaringan (build sebelum perbaikan ini tidak punya internet di aplikasi);
 - Android mendapat subtree cgroup sendiri, sehingga tidak bisa melihat atau menulis ulang grup `top-app`, `background`, dan lainnya milik ponsel;
 - kapabilitas dikurangi menjadi kumpulan yang dipertahankan konfigurasi LXC Waydroid (tanpa modul kernel, tanpa akses hardware mentah).
 
