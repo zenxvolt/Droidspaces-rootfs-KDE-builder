@@ -268,6 +268,10 @@ if [[ -f "$LINEAGE_INIT" ]]; then
   sed -i -E '/^[[:space:]]*keycodes[[:space:]]+114[[:space:]]+115[[:space:]]+116[[:space:]]*$/d' "$LINEAGE_INIT"
 fi
 
+# A declared but unavailable OMX HAL makes Android wait indefinitely while
+# enumerating codecs. Mainline Waydroid ships software Codec2.
+python3 "$SCRIPT_DIR/remove-unused-omx.py" "$ROOTFS"
+
 # Adreno GPU drivers. They replace Waydroid's gralloc.gbm.so (which needs a
 # DRM device phones do not have) and add the *_kgsl EGL/GLES libraries.
 # /sbin/init only switches Android to them when the phone has /dev/kgsl-3d0.
