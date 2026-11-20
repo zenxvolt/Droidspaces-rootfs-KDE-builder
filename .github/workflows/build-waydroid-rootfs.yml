@@ -25,6 +25,15 @@ on:
         required: true
         type: boolean
         default: true
+      archive_format:
+        description: "Archive format. zst unpacks fastest; the official Droidspaces app's Install from file accepts only xz and gz, so pick gz if your app refuses .tar.zst"
+        required: true
+        type: choice
+        default: zst
+        options:
+          - zst
+          - gz
+          - xz
       publish_release:
         description: Publish the result as a GitHub Release
         required: true
@@ -132,7 +141,7 @@ jobs:
             build-essential meson ninja-build pkg-config git dpkg-dev file \
             libwayland-dev libwayland-bin wayland-protocols libffi-dev \
             libegl-dev libgles-dev libegl-mesa0 \
-            curl aria2 unzip xz-utils python3 \
+            curl aria2 unzip xz-utils zstd pigz python3 \
             alsa-utils libasound2-plugins pulseaudio-utils
 
       - name: Build the helper programs
@@ -156,6 +165,7 @@ jobs:
           ABI: ${{ matrix.abi }}
           SYSTEM_TYPE: ${{ inputs.system_type }}
           GPU: ${{ inputs.gpu }}
+          ARCHIVE_FORMAT: ${{ inputs.archive_format }}
         run: |
           set -euo pipefail
           gpu_args=()
@@ -181,17 +191,20 @@ jobs:
           fi
           sudo ./waydroid/build-waydroid-rootfs.sh \
             -a "$ota_arch" -t "$SYSTEM_TYPE" "${gpu_args[@]}" \
-            -T "$RUNNER_TEMP/tools" -o "$RUNNER_TEMP/out"
+            -T "$RUNNER_TEMP/tools" -o "$RUNNER_TEMP/out" -f "$ARCHIVE_FORMAT"
           sudo rm -rf "$RUNNER_TEMP/out/work"
-          cp "$RUNNER_TEMP"/out/*.tar.xz "$RUNNER_TEMP"/out/*.sha256 .
-          ls -lh ./*.tar.xz
+          archive="$(cat "$RUNNER_TEMP/out/latest-archive.txt")"
+          cp "$archive" "$archive.sha256" .
+          ls -lh "./$(basename "$archive")"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v6
         with:
           name: waydroid-rootfs-${{ matrix.abi }}
           path: |
+            *.tar.zst
             *.tar.xz
+            *.tar.gz
             *.sha256
           compression-level: 0
           retention-days: 3
@@ -226,7 +239,7 @@ jobs:
             else
               echo "- Built without the GPU driver: Android always draws with the CPU."
             fi
-            echo "- Import the \`.tar.xz\` in Droidspaces as a **sparse image** of 8 GB or more."
+            echo "- Import the \`.tar.*\` archive in Droidspaces as a **sparse image** of 8 GB or more. The official app's Install from file accepts only \`.tar.xz\` and \`.tar.gz\`."
             echo "- Enable **Anland Display** and privileged mode for the container."
             echo "- \`arm64_only\` runs on every ARM64 phone. \`arm64_32\` also runs 32-bit apps but only starts on processors that still support 32-bit code."
             echo
@@ -236,7 +249,8 @@ jobs:
             cat ./*.sha256
             echo '```'
           } > notes.md
-          gh release create "$TAG" ./*.tar.xz ./*.sha256 \
+          shopt -s nullglob
+          gh release create "$TAG" ./*.tar.zst ./*.tar.xz ./*.tar.gz ./*.sha256 \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Waydroid RootFS for Droidspaces ($SYSTEM_TYPE, ${TAG#waydroid-rootfs-})" \
             --notes-file notes.md

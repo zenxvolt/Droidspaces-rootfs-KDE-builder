@@ -45,7 +45,7 @@ Droidspaces container
    - `arm64_only` runs on every ARM64 phone. Pick this if unsure.
    - `arm64_32` also runs 32-bit apps, but only starts on processors that still run 32-bit code. Many recent flagship processors do not.
 3. Leave **gpu** on. It adds the Adreno driver (a few tens of MB); phones without a Snapdragon GPU simply keep drawing with the CPU. The first build with it takes about 20 minutes longer; later builds reuse the driver.
-4. Download the `.tar.xz` from **Releases**.
+4. Download the archive from **Releases**, or from the run's artifacts. The workflow's `archive_format` picks `.tar.zst` (default, fastest to unpack), `.tar.gz` or `.tar.xz`. The official Droidspaces app's **Install from file** accepts only `.tar.xz` and `.tar.gz`: if it refuses a `.tar.zst`, build again with `gz`.
 
 To build on your own ARM64 Linux machine instead:
 
@@ -62,7 +62,7 @@ sudo ./waydroid/build-waydroid-rootfs.sh -G gpu-aarch64
 
 ## 2. Install in Droidspaces
 
-1. Import the `.tar.xz` as a new container. Choose **sparse image** storage with a size of **8 GB or more**; Android keeps its data inside the rootfs. Do not install it as a plain folder: Droidspaces itself warns that a rootfs folder on the phone's storage gets damaged by SELinux labelling.
+1. Import the archive as a new container. Choose **sparse image** storage with a size of **8 GB or more**; Android keeps its data inside the rootfs. Do not install it as a plain folder: Droidspaces itself warns that a rootfs folder on the phone's storage gets damaged by SELinux labelling.
 2. In the container settings:
    - turn **Anland Display** on;
    - turn **privileged mode** on with `nocaps` and `noseccomp`;

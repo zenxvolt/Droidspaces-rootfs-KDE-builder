@@ -20,11 +20,23 @@
 #include <grp.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+/* Keep only CAP_NET_ADMIN (needed for SO_MARK) after leaving root. */
+static int keep_net_admin(void)
+{
+    struct { uint32_t version; int pid; } h = { 0x20080522, 0 };
+    struct { uint32_t eff, perm, inh; } d[2] = { { 1u << 12, 1u << 12, 0 }, { 0, 0, 0 } };
+    return (int)syscall(SYS_capset, &h, d);
+}
 
 int main(int argc, char **argv)
 {
@@ -51,24 +63,35 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    int fd = socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) {
-        printf("socket: %s\n", strerror(errno));
-        return 1;
-    }
-    if (argc > 4) {
-        unsigned mark = (unsigned)strtoul(argv[4], NULL, 0);
-        if (setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark)) < 0) {
-            printf("SO_MARK: %s\n", strerror(errno));
-            return 1;
-        }
-    }
+    /* The kernel records a socket's owner when the socket is created, and
+     * the phone's firewall judges packets by that owner. So switch user
+     * first and create the socket afterwards. */
+    bool mark = argc > 4;
     if (argc > 3) {
         uid_t uid = (uid_t)atoi(argv[3]);
         gid_t groups[] = { 3003 /* AID_INET */ };
+        if (mark)
+            prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0);
         if (setgroups(1, groups) < 0 || setresgid(uid, uid, uid) < 0 ||
             setresuid(uid, uid, uid) < 0) {
             printf("cannot become uid %u: %s\n", (unsigned)uid, strerror(errno));
+            return 1;
+        }
+        if (mark && uid != 0 && keep_net_admin() < 0) {
+            printf("cannot keep CAP_NET_ADMIN for the mark: %s\n", strerror(errno));
+            return 1;
+        }
+    }
+    int fd = socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        /* EPERM here: the phone's firewall refuses this user any socket. */
+        printf("socket refused: %s\n", strerror(errno));
+        return 1;
+    }
+    if (mark) {
+        unsigned m = (unsigned)strtoul(argv[4], NULL, 0);
+        if (setsockopt(fd, SOL_SOCKET, SO_MARK, &m, sizeof(m)) < 0) {
+            printf("SO_MARK: %s\n", strerror(errno));
             return 1;
         }
     }

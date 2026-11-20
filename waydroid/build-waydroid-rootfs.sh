@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build a Droidspaces rootfs that IS Waydroid's Android image.
 #
-# The result is a .tar.xz that Droidspaces imports like any other rootfs. It
+# The result is a .tar.zst (or .tar.xz / .tar.gz, see -f) that Droidspaces
+# imports like any other rootfs. It
 # boots Android directly (no Linux distribution, no LXC, no nested container)
 # and shows it through the Anland app.
 #
@@ -25,7 +26,10 @@
 #   -G DIR      add the Adreno GPU drivers from DIR (one or more output
 #               directories of build-gpu-drivers.sh, merged; DIR/vendor/...)
 #   -o DIR      output directory (default: ./out)
-#   -c LEVEL    xz compression level 0-9 (default 6)
+#   -f FORMAT   archive format: zst (default; fastest to unpack), xz or gz.
+#               The official Droidspaces app's "Install from file" accepts
+#               only .tar.xz and .tar.gz; use gz there if .tar.zst is refused.
+#   -c LEVEL    compression level (default: zst 15, xz 6, gz 6)
 #   -k          keep the unpacked rootfs directory
 set -euo pipefail
 
@@ -38,13 +42,14 @@ VENDOR_FILE=""
 TOOLS_DIR=""
 GPU_DIRS=()
 OUT_DIR="$SCRIPT_DIR/out"
-XZ_LEVEL=6
+ARCHIVE_FORMAT=zst
+LEVEL=""
 KEEP_ROOTFS=false
 
 : "${WAYDROID_OTA_URL:=https://ota.waydro.id}"
 : "${WAYDROID_OTA_FALLBACK_URL:=https://raw.githubusercontent.com/waydroid/OTA/master}"
 
-while getopts "t:a:S:V:T:G:o:c:kh" opt; do
+while getopts "t:a:S:V:T:G:o:f:c:kh" opt; do
   case "$opt" in
     t) SYSTEM_TYPE="$OPTARG" ;;
     a) OTA_ARCH="$OPTARG" ;;
@@ -53,9 +58,10 @@ while getopts "t:a:S:V:T:G:o:c:kh" opt; do
     T) TOOLS_DIR="$OPTARG" ;;
     G) GPU_DIRS+=("$OPTARG") ;;
     o) OUT_DIR="$OPTARG" ;;
-    c) XZ_LEVEL="$OPTARG" ;;
+    f) ARCHIVE_FORMAT="$OPTARG" ;;
+    c) LEVEL="$OPTARG" ;;
     k) KEEP_ROOTFS=true ;;
-    *) sed -n '2,29p' "$0"; exit 1 ;;
+    *) sed -n '2,33p' "$0"; exit 1 ;;
   esac
 done
 
@@ -65,8 +71,18 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 [[ "$(id -u)" -eq 0 ]] || die "run this script as root (sudo): it has to mount the Android images"
 case "$SYSTEM_TYPE" in VANILLA|GAPPS) ;; *) die "-t must be VANILLA or GAPPS" ;; esac
 case "$OTA_ARCH" in waydroid_arm64|waydroid_arm64_only) ;; *) die "-a must be waydroid_arm64 or waydroid_arm64_only" ;; esac
-[[ "$XZ_LEVEL" =~ ^[0-9]$ ]] || die "-c must be a digit from 0 to 9"
-for tool in curl unzip tar xz python3 mount sha256sum; do
+case "$ARCHIVE_FORMAT" in
+  zst) LEVEL="${LEVEL:-15}"; [[ "$LEVEL" =~ ^([1-9]|1[0-9])$ ]] || die "-c must be 1-19 for zst"
+       COMPRESS=(zstd -q -T0 "-$LEVEL"); COMPRESSOR=zstd ;;
+  xz)  LEVEL="${LEVEL:-6}"; [[ "$LEVEL" =~ ^[0-9]$ ]] || die "-c must be 0-9 for xz"
+       COMPRESS=(xz -T0 "-$LEVEL"); COMPRESSOR=xz ;;
+  gz)  LEVEL="${LEVEL:-6}"; [[ "$LEVEL" =~ ^[1-9]$ ]] || die "-c must be 1-9 for gz"
+       # pigz compresses on every core; plain gzip works too, only slower.
+       if command -v pigz >/dev/null; then COMPRESS=(pigz "-$LEVEL"); COMPRESSOR=pigz
+       else COMPRESS=(gzip "-$LEVEL"); COMPRESSOR=gzip; fi ;;
+  *)   die "-f must be zst, xz or gz" ;;
+esac
+for tool in curl unzip tar "$COMPRESSOR" python3 mount sha256sum; do
   command -v "$tool" >/dev/null || die "missing tool: $tool"
 done
 
@@ -339,9 +355,9 @@ done
 # --- 5. pack -----------------------------------------------------------------
 # The label says what the tree really contains, also for images passed with -S.
 if [[ -e "$ROOTFS/system/bin/linker" ]]; then ABI_LABEL="arm64_32"; else ABI_LABEL="arm64_only"; fi
-ARCHIVE="$OUT_DIR/Waydroid-LineageOS-${LINEAGE_VERSION:-unknown}-${SYSTEM_TYPE}-${ABI_LABEL}-Droidspaces-Anland-${BUILD_DATE}.tar.xz"
+ARCHIVE="$OUT_DIR/Waydroid-LineageOS-${LINEAGE_VERSION:-unknown}-${SYSTEM_TYPE}-${ABI_LABEL}-Droidspaces-Anland-${BUILD_DATE}.tar.${ARCHIVE_FORMAT}"
 log "Packing $(basename "$ARCHIVE") (this takes a few minutes)"
-tar -C "$ROOTFS" --format=gnu --numeric-owner "${TAR_XATTRS[@]}" -cf - . | xz -T0 "-$XZ_LEVEL" > "$ARCHIVE.part"
+tar -C "$ROOTFS" --format=gnu --numeric-owner "${TAR_XATTRS[@]}" -cf - . | "${COMPRESS[@]}" > "$ARCHIVE.part"
 mv "$ARCHIVE.part" "$ARCHIVE"
 (cd "$OUT_DIR" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
 

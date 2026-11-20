@@ -45,7 +45,7 @@ Container Droidspaces
    - `arm64_only` berjalan di semua ponsel ARM64. Pilih ini bila ragu.
    - `arm64_32` juga menjalankan aplikasi 32-bit, tetapi hanya bisa menyala di prosesor yang masih mendukung kode 32-bit. Banyak prosesor kelas atas terbaru tidak.
 3. Biarkan **gpu** menyala. Pilihan ini menambahkan driver Adreno (beberapa puluh MB); ponsel tanpa GPU Snapdragon tetap menggambar dengan CPU. Build pertama dengan pilihan ini sekitar 20 menit lebih lama; build berikutnya memakai ulang driver yang sudah jadi.
-4. Unduh berkas `.tar.xz` dari **Releases**.
+4. Unduh arsipnya dari **Releases** atau dari artifact run. Input `archive_format` di workflow memilih `.tar.zst` (bawaan, paling cepat dibongkar), `.tar.gz`, atau `.tar.xz`. **Install from file** di aplikasi Droidspaces resmi hanya menerima `.tar.xz` dan `.tar.gz`: bila `.tar.zst` ditolak, build ulang dengan `gz`.
 
 Untuk membangun sendiri di mesin Linux ARM64:
 
@@ -62,7 +62,7 @@ sudo ./waydroid/build-waydroid-rootfs.sh -G gpu-aarch64
 
 ## 2. Memasang di Droidspaces
 
-1. Impor `.tar.xz` sebagai container baru. Pilih penyimpanan **sparse image** berukuran **8 GB atau lebih**; data Android disimpan di dalam rootfs. Jangan memasangnya sebagai folder biasa: Droidspaces sendiri memperingatkan bahwa rootfs berupa folder di penyimpanan ponsel bisa rusak karena pelabelan SELinux.
+1. Impor arsipnya sebagai container baru. Pilih penyimpanan **sparse image** berukuran **8 GB atau lebih**; data Android disimpan di dalam rootfs. Jangan memasangnya sebagai folder biasa: Droidspaces sendiri memperingatkan bahwa rootfs berupa folder di penyimpanan ponsel bisa rusak karena pelabelan SELinux.
 2. Di pengaturan container:
    - nyalakan **Anland Display**;
    - nyalakan **mode privileged** dengan `nocaps` dan `noseccomp`;

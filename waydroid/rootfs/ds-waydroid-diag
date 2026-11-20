@@ -45,7 +45,8 @@ run() { echo "\$ $*"; "$@" 2>&1; }
   # shows which one breaks app traffic: the mark (routing inside Android) or
   # the user (filtering by UID, for example by the phone's own Android).
   section "Network: TCP like an app (ds-net-probe)"
-  MARK="$(ip rule 2>/dev/null | sed -n 's/.*fwmark \(0x[0-9a-f]*\)\/0xffff.* lookup eth0.*/\1/p' | head -n1)"
+  # Apps carry the network ID in the mark (e.g. 0x64), matched as .../0x1ffff.
+  MARK="$(ip rule 2>/dev/null | sed -n 's/.*fwmark \(0x[0-9a-f]*\)\/0x1ffff iif lo uidrange.* lookup eth0.*/\1/p' | grep -v '^0x1' | head -n1)"
   echo "netd mark of the eth0 network: ${MARK:-not found}"
   for target in 1.1.1.1 8.8.8.8; do
     echo "$target:443 as root:              $(ds-net-probe $target 443)"
