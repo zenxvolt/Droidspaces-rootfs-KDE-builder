@@ -55,6 +55,7 @@
 #include "xdg-shell-server-protocol.h"
 #include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "display_producer.h"
+#include "anland-clipboard.h"
 #include "display-geometry.h"
 #include "gpu-copy-protocol.h"
 
@@ -187,6 +188,7 @@ struct bridge {
     struct config cfg;
     struct wl_display *display;
     struct wl_event_loop *loop;
+    struct anland_clipboard *clipboard;
     struct wl_event_source *tick;
     uint64_t tick_due_ms;
 
@@ -1081,6 +1083,7 @@ static void set_client_display(struct bridge *b, uint32_t w, uint32_t h, uint32_
 
 static void session_teardown(struct bridge *b)
 {
+    anland_clipboard_cancel_receive(b->clipboard);
     if (b->ready_source) { wl_event_source_remove(b->ready_source); b->ready_source = NULL; }
     if (b->data_source) { wl_event_source_remove(b->data_source); b->data_source = NULL; }
     for (int i = 0; i < b->target_count; i++) {
@@ -1109,22 +1112,43 @@ static void touch_send_all(struct bridge *b, int action, int id, float x, float 
 static void touch_frame_all(struct bridge *b);
 static void key_send_all(struct bridge *b, uint32_t key, bool pressed);
 
-static void drain_payload(struct bridge *b, uint32_t size)
+static void flush_clipboard_output(struct bridge *b)
 {
-    if (size == 0)
+    int pending = flush_queued_output(b->ctx);
+    if (pending >= 0 && b->data_source)
+        wl_event_source_fd_update(b->data_source,
+                                  WL_EVENT_READABLE | (pending ? WL_EVENT_WRITABLE : 0));
+}
+
+static void send_clipboard_to_anland(void *data, const void *text, size_t size)
+{
+    struct bridge *b = data;
+    if (b->session && queue_clipboard(b->ctx, text, size) == 0)
+        flush_clipboard_output(b);
+}
+
+static void read_input_payload(struct bridge *b, uint32_t size, bool clipboard)
+{
+    if (size == 0) {
+        if (clipboard)
+            anland_clipboard_set_text(b->clipboard, NULL, 0);
         return;
-    if (size > (4u << 20)) { /* never trust a huge length */
+    }
+    if (size > (4u << 20)) { /* Bound allocations, even for messages we discard. */
         force_fallback(b->ctx);
         return;
     }
     void *buf = malloc(size);
     if (!buf) { force_fallback(b->ctx); return; }
     uint64_t deadline = now_ms64() + 3000;
-    for (;;) {
-        int rc = poll_input_event_extend_data(b->ctx, buf, size, 200);
-        if (rc != 0 || now_ms64() > deadline || !b->session)
-            break;
-    }
+    int rc;
+    do {
+        rc = poll_input_event_extend_data(b->ctx, buf, size, 200);
+    } while (rc == 0 && b->session && now_ms64() < deadline);
+    if (rc == 1 && clipboard && size <= ANLAND_CLIPBOARD_LIMIT)
+        anland_clipboard_set_text(b->clipboard, buf, size);
+    else if (rc == 0 && b->session)
+        force_fallback(b->ctx);
     free(buf);
 }
 
@@ -1169,10 +1193,10 @@ static void handle_input_event(struct bridge *b, const struct InputEvent *ev)
         }
         break;
     case INPUT_TYPE_CLIPBOARD:
-        drain_payload(b, ev->clipboard.size);
+        read_input_payload(b, ev->clipboard.size, true);
         break;
     case INPUT_TYPE_TEXT_INPUT:
-        drain_payload(b, ev->text_input.size);
+        read_input_payload(b, ev->text_input.size, false);
         break;
     case INPUT_TYPE_RESOURCE: {
         int fds[64], count = 0;
@@ -1198,6 +1222,8 @@ static int on_data(int fd, uint32_t mask, void *data)
             force_fallback(b->ctx);
         return 0;
     }
+    if (mask & WL_EVENT_WRITABLE)
+        flush_clipboard_output(b);
     for (int i = 0; i < 256 && b->session; i++) {
         struct InputEvent ev;
         int rc = poll_input_event(b->ctx, &ev, 0);
@@ -1659,6 +1685,7 @@ static void surface_resource_destroy(struct wl_resource *r)
         wl_resource_set_user_data(s->toplevel, NULL);
     if (b->top == s) {
         b->top = NULL;
+        anland_clipboard_focus(b->clipboard, NULL);
         b->frame_serial++;
         b->pointer_down = false;
         INFO("Android closed its display window");
@@ -1795,6 +1822,8 @@ static void send_toplevel_configure(struct surface *s)
     if (!s->configure_sent) {
         s->configure_sent = true;
         keyboard_enter_all(b);
+        if (b->top == s)
+            anland_clipboard_focus(b->clipboard, wl_resource_get_client(s->resource));
     }
 }
 
@@ -1807,6 +1836,7 @@ static void toplevel_resource_destroy(struct wl_resource *r)
     s->configure_sent = false;
     if (s->bridge->top == s) {
         s->bridge->top = NULL;
+        anland_clipboard_focus(s->bridge->clipboard, NULL);
         s->bridge->frame_serial++;
     }
 }
@@ -2447,6 +2477,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    b->clipboard = anland_clipboard_create(b->display, send_clipboard_to_anland, b);
+    if (!b->clipboard) {
+        WARN("cannot register the Wayland clipboard");
+        return 1;
+    }
+
     wl_event_loop_add_signal(b->loop, SIGTERM, on_signal, b);
     wl_event_loop_add_signal(b->loop, SIGINT, on_signal, b);
     b->tick = wl_event_loop_add_timer(b->loop, on_tick, b);
@@ -2469,6 +2505,7 @@ int main(int argc, char **argv)
         disconnect(b->ctx);
     }
     wl_display_destroy_clients(b->display);
+    anland_clipboard_destroy(b->clipboard);
     wl_display_destroy(b->display);
     gc_stop(b);
     free(b->xmap);

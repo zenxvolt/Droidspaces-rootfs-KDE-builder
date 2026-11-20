@@ -83,6 +83,7 @@ int main(int argc, char **argv)
     fflush(stdout);
 
     int got = 0, fences = 0;
+    bool copied = false;
     for (int attempt = 0; attempt < 2000 && got < frames; attempt++) {
         int idx = got % NBUF;
         if (select_dmabuf(ctx, idx) < 0) {
@@ -102,6 +103,19 @@ int main(int argc, char **argv)
             /* Wait for the session, and for the Android gradient in the normal tests. */
             usleep(20000);
             continue;
+        }
+        struct OutputEvent output;
+        if (!idle_test && poll_output_event(ctx, &output, 0) == 1 &&
+            output.type == OUTPUT_TYPE_CLIPBOARD) {
+            const char expected[] = "Salinan dari Waydroid";
+            char text[sizeof(expected) - 1];
+            if (output.clipboard.size != sizeof(text) ||
+                poll_output_event_extend_data(ctx, text, sizeof(text), 1000) != 1 ||
+                memcmp(text, expected, sizeof(text)) != 0) {
+                fprintf(stderr, "fake-app: unexpected clipboard text\n");
+                return 1;
+            }
+            copied = true;
         }
         got++;
         if (got <= 3 || got == frames || (idle_test && got > frames - NBUF)) {
@@ -134,17 +148,19 @@ int main(int argc, char **argv)
             push_input_event(ctx, &key);
             key.key.action = INPUT_ACTION_UP;
             push_input_event(ctx, &key);
-            /* A variable-length event the bridge must skip without losing sync. */
-            const char text[] = "clipboard text the bridge ignores";
+            /* Clipboard traffic must preserve framing for the following key event. */
+            char text[] = "Tempel dari AnLand: é";
             struct InputEvent clip = { .type = INPUT_TYPE_CLIPBOARD };
-            clip.clipboard.size = sizeof(text);
-            push_input_event_with_length(ctx, &clip, (void *)text, sizeof(text));
+            clip.clipboard.size = sizeof(text) - 1;
+            push_input_event_with_length(ctx, &clip, text, sizeof(text) - 1);
             key.key.action = INPUT_ACTION_DOWN;
             key.key.keycode = 48; /* KEY_B, must still arrive after the clipboard */
             push_input_event(ctx, &key);
         }
     }
     printf("fake-app: received %d frames, %d with a render fence\n", got, fences);
+    if (copied)
+        puts("fake-app: received the Android clipboard");
     fflush(stdout);
     usleep(300000);
     disconnect(ctx);

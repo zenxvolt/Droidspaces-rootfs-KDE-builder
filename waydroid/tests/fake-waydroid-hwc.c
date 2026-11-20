@@ -35,6 +35,8 @@ static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
 static struct wl_seat *seat;
 static struct wl_output *output;
+static struct wl_data_device_manager *data_manager;
+static struct wl_display *dpy;
 static int configured, req_w, req_h, out_w, out_h, out_refresh;
 static int have_subcompositor, have_viewporter, have_dmabuf;
 static struct zwp_linux_dmabuf_v1 *dmabuf;
@@ -169,6 +171,67 @@ static void seat_caps(void *d, struct wl_seat *s, uint32_t caps)
 static void seat_name(void *d, struct wl_seat *s, const char *name) { (void)d; (void)s; (void)name; }
 static const struct wl_seat_listener seat_listener = { seat_caps, seat_name };
 
+static void offer_mime(void *data, struct wl_data_offer *offer, const char *mime)
+{
+    (void)data; (void)offer; (void)mime;
+}
+
+static const struct wl_data_offer_listener clip_offer_listener = { .offer = offer_mime };
+
+static void data_offer(void *data, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+    (void)data; (void)device;
+    wl_data_offer_add_listener(offer, &clip_offer_listener, NULL);
+}
+
+static void source_send(void *data, struct wl_data_source *source, const char *mime, int32_t fd)
+{
+    (void)data; (void)source; (void)mime;
+    const char text[] = "Salinan dari Waydroid";
+    if (write(fd, text, sizeof(text) - 1) != (ssize_t)sizeof(text) - 1)
+        perror("hwc: clipboard write");
+    close(fd);
+}
+
+static void source_cancelled(void *data, struct wl_data_source *source)
+{
+    (void)data;
+    wl_data_source_destroy(source);
+}
+
+static const struct wl_data_source_listener clip_source_listener = {
+    .send = source_send, .cancelled = source_cancelled,
+};
+
+static void data_selection(void *data, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+    (void)data;
+    if (!offer)
+        return;
+    int fds[2];
+    if (pipe(fds) < 0)
+        return;
+    wl_data_offer_receive(offer, "text/plain;charset=utf-8", fds[1]);
+    close(fds[1]);
+    wl_display_roundtrip(dpy); /* Match Waydroid's receive-before-read sequence. */
+    char text[128];
+    ssize_t n = read(fds[0], text, sizeof(text) - 1);
+    close(fds[0]);
+    wl_data_offer_destroy(offer);
+    const char expected[] = "Tempel dari AnLand: é";
+    if (n == (ssize_t)sizeof(expected) - 1 && memcmp(text, expected, (size_t)n) == 0) {
+        puts("hwc: received the AnLand clipboard");
+        struct wl_data_source *source = wl_data_device_manager_create_data_source(data_manager);
+        wl_data_source_add_listener(source, &clip_source_listener, NULL);
+        wl_data_source_offer(source, "text/plain;charset=utf-8");
+        wl_data_device_set_selection(device, source, 0);
+    }
+}
+
+static const struct wl_data_device_listener data_listener = {
+    .data_offer = data_offer, .selection = data_selection,
+};
+
 static void global_add(void *d, struct wl_registry *reg, uint32_t id, const char *iface, uint32_t ver)
 {
     (void)d;
@@ -182,6 +245,8 @@ static void global_add(void *d, struct wl_registry *reg, uint32_t id, const char
     } else if (!strcmp(iface, "wl_seat")) {
         seat = wl_registry_bind(reg, id, &wl_seat_interface, ver < 5 ? ver : 5);
         wl_seat_add_listener(seat, &seat_listener, NULL);
+    } else if (!strcmp(iface, "wl_data_device_manager")) {
+        data_manager = wl_registry_bind(reg, id, &wl_data_device_manager_interface, 1);
     } else if (!strcmp(iface, "wl_output")) {
         output = wl_registry_bind(reg, id, &wl_output_interface, ver < 3 ? ver : 3);
         wl_output_add_listener(output, &output_listener, NULL);
@@ -259,7 +324,7 @@ int main(int argc, char **argv)
     use_dmabuf = getenv("FAKE_HWC_DMABUF") && !strcmp(getenv("FAKE_HWC_DMABUF"), "1");
     use_565 = getenv("FAKE_HWC_FORMAT") && !strcmp(getenv("FAKE_HWC_FORMAT"), "565");
 
-    struct wl_display *dpy = wl_display_connect(NULL);
+    dpy = wl_display_connect(NULL);
     if (!dpy) {
         fprintf(stderr, "hwc: cannot connect to the Wayland display\n");
         return 1;
@@ -283,6 +348,10 @@ int main(int argc, char **argv)
     }
     printf("hwc: output mode %dx%d @ %d mHz\n", out_w, out_h, out_refresh);
 
+    if (data_manager) {
+        struct wl_data_device *device = wl_data_device_manager_get_data_device(data_manager, seat);
+        wl_data_device_add_listener(device, &data_listener, NULL);
+    }
     struct wl_surface *surface = wl_compositor_create_surface(compositor);
     struct xdg_surface *xs = xdg_wm_base_get_xdg_surface(wm_base, surface);
     xdg_surface_add_listener(xs, &xsurface_listener, NULL);

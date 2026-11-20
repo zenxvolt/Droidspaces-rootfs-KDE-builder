@@ -25,7 +25,8 @@ Container Droidspaces
 | Keyboard | Tombol fisik diteruskan. Untuk mengetik, pakai keyboard layar milik Android. |
 | Mouse | Klik kiri atau seret diteruskan sebagai ketukan atau usapan jari. Tidak ada kursor dan roda gulir. |
 | Akselerasi GPU | Khusus Snapdragon (Adreno): OpenGL ES lewat Mesa freedreno di atas KGSL, dan Vulkan (Mesa turnip) bila diaktifkan. Belum terbukti di ponsel. GPU Mali, PowerVR, dan lainnya: tidak. |
-| Suara, kamera, sensor, clipboard | Belum ada. |
+| Clipboard | Teks bisa disalin dan ditempel antara Anland dan Android di Waydroid. |
+| Suara, kamera, sensor | Belum ada. |
 | Jaringan | Memakai jaringan container Droidspaces. Belum terbukti. |
 
 ## Syarat

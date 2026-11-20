@@ -25,7 +25,8 @@ Droidspaces container
 | Keyboard | Hardware keys are forwarded. Use Android's own on-screen keyboard for typing. |
 | Mouse | A left click or drag is delivered as a finger tap or swipe. No pointer, no wheel. |
 | GPU acceleration | Snapdragon (Adreno) only, OpenGL ES through Mesa freedreno on KGSL. Optional Vulkan (Mesa turnip). Not yet confirmed on a phone. Mali, PowerVR and other GPUs: no. |
-| Sound, camera, sensors, clipboard | Not available. |
+| Clipboard | Plain text can be copied and pasted between Anland and Android in Waydroid. |
+| Sound, camera, sensors | Not available. |
 | Network | Uses the Droidspaces container network. Not confirmed. |
 
 ## Requirements

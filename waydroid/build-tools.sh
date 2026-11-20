@@ -150,6 +150,7 @@ log "Building anland-waydroid-bridge"
   -I"$SCRIPT_DIR/src" -I"$ANLAND_SRC/libdisplay_producer" -I"$ANLAND_SRC/common" \
   -o "$OUT_DIR/anland-waydroid-bridge" \
   "$SCRIPT_DIR/src/anland-waydroid-bridge.c" \
+  "$SCRIPT_DIR/src/anland-clipboard.c" \
   "$GEN_DIR/xdg-shell-protocol.c" \
   "$GEN_DIR/linux-dmabuf-unstable-v1-protocol.c" \
   "$ANLAND_SRC/libdisplay_producer/display_producer.c" \

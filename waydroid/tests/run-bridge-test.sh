@@ -112,7 +112,9 @@ check "picture arrives with correct colours" check_picture "$SCENARIO_DIR/frame-
 check "touch reaches Android at the right place" grep -q "hwc: touch down id=0 x=360 y=320 surface=ok" "$SCENARIO_DIR/hwc.log"
 check "touch release reaches Android" grep -q "hwc: touch up id=0" "$SCENARIO_DIR/hwc.log"
 check "key press reaches Android" grep -q "hwc: key 30 down" "$SCENARIO_DIR/hwc.log"
-check "input survives an ignored clipboard message" grep -q "hwc: key 48 down" "$SCENARIO_DIR/hwc.log"
+check "input survives a clipboard message" grep -q "hwc: key 48 down" "$SCENARIO_DIR/hwc.log"
+check "AnLand clipboard reaches Waydroid" grep -Fq "hwc: received the AnLand clipboard" "$SCENARIO_DIR/hwc.log"
+check "Waydroid clipboard reaches AnLand" grep -Fq "fake-app: received the Android clipboard" "$SCENARIO_DIR/app.log"
 check "keyboard focus is given to Android" grep -q "hwc: keyboard enter surface=ok" "$SCENARIO_DIR/hwc.log"
 
 # 2. Android renders at half resolution and the bridge scales it up.
