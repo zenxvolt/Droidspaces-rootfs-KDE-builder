@@ -14,7 +14,7 @@ Droidspaces container
 ```
 
 > [!WARNING]
-> **Status: experimental.** Android has been reported to boot and show in Anland on a phone with CPU drawing. The GPU path (Snapdragon only) is new and has not been confirmed on a phone yet; if it fails, Android can be switched back to CPU drawing with `gpu.mode=off` (see [Settings](#3-settings)).
+> **Status: experimental.** Android has booted and appeared in Anland on the test phone with software rendering and with its Adreno 725 GPU. Use `gpu.mode=off` to select software rendering in [Settings](#3-settings).
 
 ## What works and what does not
 
@@ -24,10 +24,10 @@ Droidspaces container
 | Touch | Multi-touch. |
 | Keyboard | Hardware keys are forwarded. Use Android's own on-screen keyboard for typing. |
 | Mouse | A left click or drag is delivered as a finger tap or swipe. No pointer, no wheel. |
-| GPU acceleration | Snapdragon (Adreno) only, OpenGL ES through Mesa freedreno on KGSL. Optional Vulkan (Mesa turnip). Not yet confirmed on a phone. Mali, PowerVR and other GPUs: no. |
+| GPU acceleration | Snapdragon (Adreno) only, OpenGL ES through Mesa freedreno on KGSL. Optional Vulkan (Mesa turnip). OpenGL ES was verified on Adreno 725. Vulkan still needs testing on a phone. |
 | Clipboard | Plain text can be copied and pasted between Anland and Android in Waydroid. |
 | Sound, camera, sensors | Not available. |
-| Network | Uses the Droidspaces container network. Not confirmed. |
+| Network | Jelly loaded an HTTPS test page through Droidspaces NAT in a Linux VM. TCP timeouts in Jelly on the test phone remain open. |
 
 ## Requirements
 
@@ -191,6 +191,6 @@ On an x86-64 Linux machine, with the scripts in `waydroid/tests/`:
 
 - `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks colours, scaling, input, late resolution changes, continuous presentation before the first Android frame and while Android holds a static frame, GPU-style dma-buf frames with padded rows, the GPU copy helper (the real one on Mesa's software renderer, and a stand-in for render fences and failures), and the `auto` settings for both drawing modes.
 - `run-init-test.sh`: `ds-waydroid-init` inside a real Droidspaces container in default, hardware-access and privileged mode, with a stand-in that makes the same calls as Waydroid's first-stage init.
-- The real ARM64 rootfs was booted in Droidspaces under CPU emulation. Android's init ran both stages, loaded the generated properties and started the bridge, then stopped at the first service that needs binder.
+- The ARM64 rootfs reached the home screen in Droidspaces under CPU emulation. Gallery, Files, bidirectional text clipboard, and an HTTPS test page through NAT were verified in Anland.
 
-Not tested: the GPU driver on a phone (it is built in CI but no Snapdragon phone was available), speed, and networking.
+See the [progress notes](../../waydroid/PROGRESS.md) for Adreno 725 validation and the remaining Jelly issue on the phone.

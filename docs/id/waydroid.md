@@ -14,7 +14,7 @@ Container Droidspaces
 ```
 
 > [!WARNING]
-> **Status: eksperimental.** Android sudah dilaporkan bisa boot dan tampil di Anland pada ponsel sungguhan dengan penggambaran CPU. Jalur GPU (khusus Snapdragon) masih baru dan belum terbukti di ponsel; bila gagal, Android bisa dikembalikan ke penggambaran CPU dengan `gpu.mode=off` (lihat [Pengaturan](#3-pengaturan)).
+> **Status: eksperimental.** Android sudah boot dan tampil di Anland pada ponsel uji dengan renderer software serta GPU Adreno 725. Gunakan `gpu.mode=off` untuk memilih renderer software di [Pengaturan](#3-pengaturan).
 
 ## Yang berfungsi dan yang belum
 
@@ -24,10 +24,10 @@ Container Droidspaces
 | Sentuhan | Multi-sentuh. |
 | Keyboard | Tombol fisik diteruskan. Untuk mengetik, pakai keyboard layar milik Android. |
 | Mouse | Klik kiri atau seret diteruskan sebagai ketukan atau usapan jari. Tidak ada kursor dan roda gulir. |
-| Akselerasi GPU | Khusus Snapdragon (Adreno): OpenGL ES lewat Mesa freedreno di atas KGSL, dan Vulkan (Mesa turnip) bila diaktifkan. Belum terbukti di ponsel. GPU Mali, PowerVR, dan lainnya: tidak. |
+| Akselerasi GPU | Khusus Snapdragon (Adreno): OpenGL ES lewat Mesa freedreno di atas KGSL, dan Vulkan (Mesa turnip) bila diaktifkan. OpenGL ES terverifikasi di Adreno 725. Vulkan masih perlu pengujian pada ponsel. |
 | Clipboard | Teks bisa disalin dan ditempel antara Anland dan Android di Waydroid. |
 | Suara, kamera, sensor | Belum ada. |
-| Jaringan | Memakai jaringan container Droidspaces. Belum terbukti. |
+| Jaringan | HTTPS di Jelly berhasil lewat NAT Droidspaces di VM Linux. Timeout TCP di Jelly pada ponsel uji masih terbuka. |
 
 ## Syarat
 
@@ -191,6 +191,6 @@ Di mesin Linux x86-64, dengan skrip di `waydroid/tests/`:
 
 - `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna, penskalaan, input, pergantian ukuran saat Anland tersambung belakangan, kelancaran koneksi sebelum frame pertama dan saat layar Android diam, frame dma-buf ala GPU dengan baris berpadding, helper penyalin GPU (helper asli di renderer software Mesa, dan tiruan untuk fence dan kegagalan), serta pengaturan `auto` untuk kedua mode penggambaran.
 - `run-init-test.sh`: `ds-waydroid-init` di dalam container Droidspaces sungguhan pada mode biasa, akses hardware, dan privileged, dengan tiruan yang melakukan pemanggilan yang sama seperti init tahap pertama Waydroid.
-- Rootfs ARM64 asli di-boot di Droidspaces lewat emulasi CPU. Init Android menjalankan kedua tahapnya, memuat properti yang dibuat, dan menyalakan jembatan, lalu berhenti di layanan pertama yang butuh binder.
+- Rootfs ARM64 asli mencapai home screen di Droidspaces lewat emulasi CPU. Gallery, Files, clipboard teks dua arah, dan halaman HTTPS uji melalui NAT terlihat berfungsi di Anland.
 
-Belum diuji: driver GPU di ponsel (driver dibangun di CI, tetapi tidak ada ponsel Snapdragon untuk mengujinya), kecepatan, dan jaringan.
+Lihat [catatan progres](../../waydroid/PROGRESS.md) untuk pengujian Adreno 725 dan kendala Jelly di ponsel.
