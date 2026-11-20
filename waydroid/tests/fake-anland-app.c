@@ -76,7 +76,8 @@ int main(int argc, char **argv)
         set_exit_fallback_callback(ctx, connected, &active);
         set_fallback_callback(ctx, fell_back, &timed_out);
     }
-    set_screen_info(ctx, w, h, 1, 60000);
+    const char *refresh_mhz = getenv("FAKE_ANLAND_REFRESH_MHZ");
+    set_screen_info(ctx, w, h, 1, refresh_mhz ? (uint32_t)atoi(refresh_mhz) : 60000);
     push_dmabufs(ctx, fds, infos, NBUF);
     printf("fake-app: connected, offering %d buffers of %ux%u\n", NBUF, w, h);
     fflush(stdout);

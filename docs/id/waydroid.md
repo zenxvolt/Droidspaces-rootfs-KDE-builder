@@ -82,7 +82,7 @@ Semua pengaturan ada di satu berkas di dalam rootfs: `/system/etc/droidspaces-wa
 | `gpu.vulkan` | `1` juga menyediakan Vulkan (Mesa turnip) untuk aplikasi dan game. Bawaan `0`. |
 | `bridge.render_scale` | Persentase resolusi layar yang dipakai Android untuk menggambar. `auto` (bawaan) berarti `100` dengan GPU dan `50` dengan CPU. `50` menggambar seperempat jumlah piksel lalu memperbesarnya, sehingga terlihat buram. |
 | `bridge.ui_width_dp` | Menentukan kepadatan sebelum SurfaceFlinger mulai, berdasarkan sisi pendek `bridge.default_width` / `bridge.default_height` setelah `render_scale` diterapkan. `400` cocok untuk ponsel. Angka lebih kecil memperbesar UI. `ro.sf.lcd_density` eksplisit punya prioritas. |
-| `bridge.max_fps` | Laju frame tertinggi yang boleh dihasilkan Android. `auto` (bawaan) berarti `60` dengan GPU dan `30` dengan CPU. |
+| `bridge.max_fps` | Batas refresh yang diumumkan ke Android. Dengan `auto`, mode GPU mengikuti refresh Anland dan mode CPU membatasi ke 30 Hz. Nilai angka menetapkan batas eksplisit. |
 | `bridge.gpu_copy` | Siapa yang menyalin frame Android ke buffer Anland. `auto` (bawaan) menyerahkannya ke GPU bila Android menggambar dengan GPU. `0` selalu memakai CPU. |
 | `bridge.wait_for_display` | Berapa detik Android menunggu aplikasi Anland sebelum memakai ukuran bawaan. |
 | baris `kunci=nilai` lainnya | Properti sistem Android. |
@@ -93,7 +93,7 @@ Untuk container sparse image yang sedang berjalan, rootfs terpasang di ponsel pa
 
 Cara Android menggambar menentukan hampir semuanya:
 
-- **Dengan GPU** (ponsel Snapdragon, Hardware Access menyala), Android menggambar pada resolusi layar penuh sampai 60 fps, dan GPU juga yang menyalin setiap frame yang sudah jadi ke buffer aplikasi Anland, sehingga CPU nyaris diam saat layar diperbarui. Bila ponsel terasa hangat, setel `bridge.max_fps=45` atau `bridge.render_scale=75` (GPU lalu memperbesar gambarnya dengan halus).
+- **Dengan GPU** (ponsel Snapdragon, Hardware Access menyala), Android menggambar pada resolusi layar penuh dan mengikuti refresh yang dilaporkan Anland. Buka Anland saat boot agar composer Waydroid mengambil refresh tersebut saat mulai. FPS gambar baru bergantung pada beban render dan penyalinan. Gunakan `bridge.max_fps` untuk memilih batas yang lebih rendah.
 - **Dengan CPU** (ponsel lain, atau `gpu.mode=off`), SwiftShader menggambar setiap piksel. Karena itu rootfs lalu hanya menggambar seperempat jumlah piksel (`render_scale` 50) pada 30 fps: gambarnya buram dan animasinya patah-patah, tetapi ponsel tetap bisa dipakai. Naikkan keduanya di berkas pengaturan bila ingin gambar lebih tajam dan halus, dengan akibat lebih panas.
 
 Pada kedua mode:

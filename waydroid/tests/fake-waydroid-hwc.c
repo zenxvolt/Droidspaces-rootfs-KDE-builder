@@ -91,6 +91,7 @@ static void out_mode(void *d, struct wl_output *o, uint32_t flags, int32_t w, in
 {
     (void)d; (void)o; (void)flags;
     out_w = w; out_h = h; out_refresh = r;
+    printf("hwc: output event %dx%d @ %d mHz\n", w, h, r);
 }
 static void out_done(void *d, struct wl_output *o) { (void)d; (void)o; }
 static void out_scale(void *d, struct wl_output *o, int32_t s) { (void)d; (void)o; (void)s; }

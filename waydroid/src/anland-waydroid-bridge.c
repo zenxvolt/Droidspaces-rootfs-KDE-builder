@@ -120,18 +120,21 @@ static void logmsg(const char *level, const char *fmt, ...)
 #define WARN(...) logmsg("W", __VA_ARGS__)
 #define DBG(...)  do { if (g_verbose) logmsg("D", __VA_ARGS__); } while (0)
 
-static uint32_t now_ms(void)
+static uint64_t now_ns(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)(ts.tv_sec * 1000ull + ts.tv_nsec / 1000000);
+    return ts.tv_sec * 1000000000ull + ts.tv_nsec;
 }
 
 static uint64_t now_ms64(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000ull + ts.tv_nsec / 1000000;
+    return now_ns() / 1000000u;
+}
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)now_ms64();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -146,7 +149,7 @@ struct config {
     char benchmark_path[PATH_MAX];
     int default_width, default_height;
     int render_scale;        /* percent of the real screen Android renders at, -1 = auto */
-    int max_fps;             /* -1 = auto */
+    int max_fps;             /* -1 = follow the Anland display */
     int gpu;                 /* -1 = read ANDROID_PROP_FILE, 0 = CPU drawing, 1 = GPU */
     int gpu_copy;            /* copy GPU frames with the GPU: -1 = when gpu, 0, 1 */
     char gpu_copy_helper[PATH_MAX];
@@ -196,7 +199,7 @@ struct bridge {
     bool target_ready;
     bool first_frame_presented;
     uint64_t frame_serial;
-    uint64_t next_present_ms;
+    uint64_t next_present_ns;
     uint64_t next_connect_ms;
     bool logged_no_daemon;
 
@@ -1028,11 +1031,11 @@ static void bind_linux_dmabuf(struct wl_client *c, void *data, uint32_t version,
 
 static uint32_t advertised_refresh(struct bridge *b)
 {
+    uint32_t refresh = b->refresh_mhz;
+    if (b->cfg.max_fps < 0)
+        return refresh;
     uint32_t cap = (uint32_t)b->cfg.max_fps * 1000u;
-    uint32_t r = b->refresh_mhz;
-    if (r < 1000 || r > 1000000)
-        r = 60000;
-    return r > cap ? cap : r;
+    return refresh > cap ? cap : refresh;
 }
 
 static void send_output_state(struct bridge *b, struct wl_resource *out)
@@ -1048,22 +1051,27 @@ static void send_output_state(struct bridge *b, struct wl_resource *out)
         wl_output_send_done(out);
 }
 
-/* Called whenever the size Android should render at may have changed. */
-static void set_client_size(struct bridge *b, uint32_t w, uint32_t h, bool from_display)
+static void set_client_display(struct bridge *b, uint32_t w, uint32_t h, uint32_t refresh)
 {
-    if (from_display)
-        b->size_from_display = true;
-    if (w == b->client_w && h == b->client_h)
+    bool resized = w != b->client_w || h != b->client_h;
+    uint32_t previous_refresh = advertised_refresh(b);
+    b->refresh_mhz = refresh;
+    bool refresh_changed = advertised_refresh(b) != previous_refresh;
+    if (!resized && !refresh_changed)
         return;
     b->client_w = w;
     b->client_h = h;
-    INFO("Android display size is now %ux%u (%s)", w, h,
-         from_display ? "from the Anland app" : "default, no Anland app yet");
+    if (resized)
+        INFO("Android display size is now %ux%u (from the Anland app)", w, h);
+    if (refresh_changed) {
+        b->next_present_ns = 0;
+        INFO("Android output refresh is now %u mHz", advertised_refresh(b));
+    }
 
     struct wl_resource *out;
     wl_resource_for_each(out, &b->outputs)
         send_output_state(b, out);
-    if (b->top && b->top->configure_sent)
+    if (resized && b->top && b->top->configure_sent)
         send_toplevel_configure(b->top);
 }
 
@@ -1085,7 +1093,7 @@ static void session_teardown(struct bridge *b)
     b->target_ready = false;
     b->first_frame_presented = false;
     b->last_delivered_serial = 0;
-    b->next_present_ms = 0;
+    b->next_present_ns = 0;
     if (b->session)
         INFO("Anland app disconnected; Android keeps running, waiting for it to come back");
     b->session = false;
@@ -1156,8 +1164,8 @@ static void handle_input_event(struct bridge *b, const struct InputEvent *ev)
     case INPUT_TYPE_DISPLAY_REFRESH:
         if (ev->display.refresh_mhz >= 1000 && ev->display.refresh_mhz <= 1000000 &&
             ev->display.refresh_mhz != b->refresh_mhz) {
-            b->refresh_mhz = ev->display.refresh_mhz;
-            DBG("Anland refresh rate: %u mHz", b->refresh_mhz);
+            set_client_display(b, b->client_w, b->client_h, ev->display.refresh_mhz);
+            maybe_present(b);
         }
         break;
     case INPUT_TYPE_CLIPBOARD:
@@ -1272,8 +1280,8 @@ static bool session_start(struct bridge *b)
     const struct buf_info *info = &b->targets[0].info;
     uint32_t w = 0, h = 0, fmt = 0, refresh = 0;
     get_screen_info(b->ctx, &w, &h, &fmt, &refresh);
-    if (refresh >= 1000 && refresh <= 1000000)
-        b->refresh_mhz = refresh;
+    if (refresh < 1000 || refresh > 1000000)
+        refresh = 60000;
 
     b->screen_w = info->width;
     b->screen_h = info->height;
@@ -1289,10 +1297,11 @@ static bool session_start(struct bridge *b)
         return false;
     }
     INFO("Anland app connected: %d buffers of %ux%u, stride %u, format %u, %u mHz",
-         count, info->width, info->height, info->stride, info->format, b->refresh_mhz);
+         count, info->width, info->height, info->stride, info->format, refresh);
 
-    set_client_size(b, scaled_dim(b->screen_w, b->cfg.render_scale),
-                    scaled_dim(b->screen_h, b->cfg.render_scale), true);
+    b->size_from_display = true;
+    set_client_display(b, scaled_dim(b->screen_w, b->cfg.render_scale),
+                       scaled_dim(b->screen_h, b->cfg.render_scale), refresh);
     b->session_serial++;
     return true;
 }
@@ -1355,9 +1364,9 @@ static void maybe_present(struct bridge *b)
     if (!b->session || !b->target_ready)
         return;
 
-    uint64_t now = now_ms64();
-    if (now < b->next_present_ms) {
-        arm_tick(b, (int)(b->next_present_ms - now));
+    uint64_t now = now_ns();
+    if (now < b->next_present_ns) {
+        arm_tick(b, (int)((b->next_present_ns - now + 999999u) / 1000000u));
         return;
     }
 
@@ -1399,8 +1408,12 @@ static void maybe_present(struct bridge *b)
         b->last_delivered_serial = target->frame_serial;
         b->delivered_frames++;
     }
-    uint32_t refresh = advertised_refresh(b);
-    b->next_present_ms = now + (1000000u + refresh - 1) / refresh;
+    /* Keep the phase across timer wakeups so rounding to whole milliseconds
+     * does not turn a period of 8.333 ms into 9 ms on every frame. */
+    uint64_t period_ns = 1000000000000ull / advertised_refresh(b);
+    b->next_present_ns += period_ns;
+    if (b->next_present_ns <= now)
+        b->next_present_ns = now + period_ns;
     if (copied && !b->first_frame_presented) {
         INFO("presented the first Android frame to Anland (copied by the %s)",
              by_gpu ? "GPU" : "CPU");
@@ -2283,8 +2296,7 @@ static bool android_uses_gpu(void)
     return gpu;
 }
 
-/* "auto" picks what suits how Android draws: with the GPU the full resolution
- * at 60 frames per second; with the CPU a quarter of the pixels at 30. */
+/* GPU auto follows Anland's refresh. CPU auto caps it at 30 Hz. */
 static void config_resolve_auto(struct config *c)
 {
     if (c->gpu < 0)
@@ -2294,8 +2306,8 @@ static void config_resolve_auto(struct config *c)
         c->gpu_copy = gpu;
     if (c->render_scale < 0)
         c->render_scale = gpu ? 100 : 50;
-    if (c->max_fps < 0)
-        c->max_fps = gpu ? 60 : 30;
+    if (c->max_fps < 0 && !gpu)
+        c->max_fps = 30;
 }
 
 static void config_clamp(struct config *c)
@@ -2303,7 +2315,7 @@ static void config_clamp(struct config *c)
     if (c->default_width < 64 || c->default_width > 16384) c->default_width = DEFAULT_DISPLAY_WIDTH;
     if (c->default_height < 64 || c->default_height > 16384) c->default_height = DEFAULT_DISPLAY_HEIGHT;
     if (c->render_scale < 10 || c->render_scale > 100) c->render_scale = 100;
-    if (c->max_fps < 1 || c->max_fps > 240) c->max_fps = 60;
+    if (c->max_fps < -1 || c->max_fps == 0 || c->max_fps > 240) c->max_fps = 60;
     if (c->wait_for_display_ms < 0 || c->wait_for_display_ms > 600000)
         c->wait_for_display_ms = 20000;
     if (c->ui_width_dp < 0 || c->ui_width_dp > 2000) c->ui_width_dp = 0;
@@ -2321,7 +2333,7 @@ static void usage(const char *argv0)
         "  --render_scale PCT     Android renders at this percentage of the screen (10-100,\n"
         "                         auto = 100 when Android draws with the GPU, else 50)\n"
         "  --max_fps N            upper limit for the refresh rate reported to Android\n"
-        "                         (auto = 60 with the GPU, else 30)\n"
+        "                         (auto = follow Anland with the GPU, else cap at 30)\n"
         "  --gpu auto|0|1         whether Android draws with the GPU, for the auto values\n"
         "                         (auto reads ro.hardware.egl from " ANDROID_PROP_FILE ")\n"
         "  --gpu_copy auto|0|1    copy GPU frames to Anland with the GPU (auto = when --gpu)\n"
@@ -2440,10 +2452,15 @@ int main(int argc, char **argv)
     b->tick = wl_event_loop_add_timer(b->loop, on_tick, b);
     arm_tick(b, 1);
 
-    INFO("ready: Wayland socket %s, Anland socket %s, default %dx%d, scale %d%%, max %d fps, "
+    char fps_limit[32];
+    if (c->max_fps < 0)
+        snprintf(fps_limit, sizeof(fps_limit), "follows Anland refresh");
+    else
+        snprintf(fps_limit, sizeof(fps_limit), "max %d fps", c->max_fps);
+    INFO("ready: Wayland socket %s, Anland socket %s, default %dx%d, scale %d%%, %s, "
          "Android draws with the %s",
          path, c->anland_socket, c->default_width, c->default_height, c->render_scale,
-         c->max_fps, c->gpu == 1 ? "GPU" : "CPU");
+         fps_limit, c->gpu == 1 ? "GPU" : "CPU");
 
     wl_display_run(b->display);
 

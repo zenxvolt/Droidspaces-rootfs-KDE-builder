@@ -82,7 +82,7 @@ One file inside the rootfs holds all settings: `/system/etc/droidspaces-waydroid
 | `gpu.vulkan` | `1` also offers Vulkan (Mesa turnip) to apps and games. Default `0`. |
 | `bridge.render_scale` | Percentage of the screen resolution Android renders at. `auto` (default) is `100` with the GPU and `50` with the CPU. `50` draws a quarter of the pixels and enlarges the picture, which looks blurry. |
 | `bridge.ui_width_dp` | Sets density before SurfaceFlinger starts, using the short side of `bridge.default_width` / `bridge.default_height` after applying `render_scale`. `400` suits a phone. Lower values make the UI larger. An explicit `ro.sf.lcd_density` takes precedence. |
-| `bridge.max_fps` | Highest frame rate Android may produce. `auto` (default) is `60` with the GPU and `30` with the CPU. |
+| `bridge.max_fps` | Refresh cap advertised to Android. With `auto`, GPU mode follows Anland and CPU mode caps refresh at 30 Hz. A number sets an explicit cap. |
 | `bridge.gpu_copy` | Who copies Android's frames into the Anland buffer. `auto` (default) lets the GPU do it when Android draws with the GPU. `0` always uses the CPU. |
 | `bridge.wait_for_display` | Seconds Android's display start waits for the Anland app before using the default size. |
 | other `key=value` lines | Android system properties. |
@@ -93,7 +93,7 @@ For a running sparse-image container the rootfs is mounted on the phone under `/
 
 How Android draws decides almost everything:
 
-- **With the GPU** (Snapdragon phone, Hardware Access on), Android renders at the full screen resolution and up to 60 fps, and the GPU also copies each finished frame into the Anland app's buffer, so the CPU stays almost idle while the screen updates. If the phone gets warm, set `bridge.max_fps=45` or `bridge.render_scale=75` (the GPU then enlarges the picture smoothly).
+- **With the GPU** (Snapdragon phone, Hardware Access on), Android renders at full screen resolution and follows the refresh reported by Anland. Open Anland during boot so the Waydroid composer picks up that refresh when it starts. New-frame FPS depends on rendering and copy workload. Set `bridge.max_fps` for a lower cap.
 - **With the CPU** (every other phone, or `gpu.mode=off`), SwiftShader draws every pixel. That is why the rootfs then renders only a quarter of the pixels (`render_scale` 50) at 30 fps: the picture is blurry and animations stutter, but the phone stays usable. Raise both in the settings file for a sharper, smoother picture at the cost of heat.
 
 Either way:

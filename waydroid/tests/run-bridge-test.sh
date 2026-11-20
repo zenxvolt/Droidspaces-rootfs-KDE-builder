@@ -178,18 +178,25 @@ else
 fi
 
 # 2g. "auto" settings follow the drawing mode.
-scenario auto-cpu 720 1280 app_first --render_scale auto --max_fps auto --gpu 0
+FAKE_ANLAND_REFRESH_MHZ=120000 scenario auto-cpu 720 1280 app_first --render_scale auto --max_fps auto --gpu 0
 check "auto uses half the resolution when the CPU draws" grep -q "hwc: drawing at 360x640" "$SCENARIO_DIR/hwc.log"
 check "auto limits to 30 fps when the CPU draws" grep -q "scale 50%, max 30 fps" "$SCENARIO_DIR/bridge.log"
-FAKE_HWC_DMABUF=1 scenario auto-gpu 720 1280 app_first --render_scale auto --max_fps auto --gpu 1
+check "the composer gets 30 Hz with CPU auto on a 120 Hz host" grep -q "output mode 360x640 @ 30000 mHz" "$SCENARIO_DIR/hwc.log"
+FAKE_ANLAND_REFRESH_MHZ=120000 FAKE_HWC_DMABUF=1 scenario auto-gpu 720 1280 app_first --render_scale auto --max_fps auto --gpu 1
 check "auto uses the full resolution with the GPU" grep -q "hwc: drawing at 720x1280" "$SCENARIO_DIR/hwc.log"
-check "auto allows 60 fps with the GPU" grep -q "scale 100%, max 60 fps" "$SCENARIO_DIR/bridge.log"
+check "the composer gets 120 Hz with GPU auto" grep -q "output mode 720x1280 @ 120000 mHz" "$SCENARIO_DIR/hwc.log"
+FAKE_ANLAND_REFRESH_MHZ=120000 scenario limited-gpu 360 640 app_first --max_fps 90 --gpu 1
+check "the composer gets the explicit 90 Hz ceiling" grep -q "output mode 360x640 @ 90000 mHz" "$SCENARIO_DIR/hwc.log"
 
 # 3. Android starts before the app; the app connects later with another size.
 scenario app-late 600 1000 hwc_first --render_scale 100 --wait_for_display 1 --default_width 480 --default_height 800
 check "Android starts at the default size" grep -q "hwc: drawing at 480x800" "$SCENARIO_DIR/hwc.log"
 check "Android switches to the app's size" grep -q "hwc: drawing at 600x1000" "$SCENARIO_DIR/hwc.log"
 check "picture is correct after the switch" check_picture "$SCENARIO_DIR/frame-40.ppm" 600 1000
+FAKE_ANLAND_REFRESH_MHZ=120000 scenario refresh-late 480 800 hwc_first --gpu 1 --wait_for_display 4 \
+  --default_width 480 --default_height 800
+check "late connection publishes 120 Hz at the same resolution" \
+  grep -q "output event 480x800 @ 120000 mHz" "$SCENARIO_DIR/hwc.log"
 
 # Keep asking for frames for longer than Anland's five-second timeout, first
 # without a Wayland client, then with just one Android frame on screen.
