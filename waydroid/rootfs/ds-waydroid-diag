@@ -43,7 +43,7 @@ run() { echo "\$ $*"; "$@" 2>&1; }
   section "Sound"
   run getprop waydroid.pulse_runtime_path
   run ls -l /run/xdg/pulse/
-  run ls -l /tmp/.pulse-socket
+  grep -E "sound|pulse|audio" /ds-waydroid-bridge.log 2>/dev/null | tail -40
   dumpsys media.audio_flinger 2>&1 | head -60
 
   section "Recent system log: network"

@@ -70,7 +70,8 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential meson ninja-build pkg-config git dpkg-dev file \
             libwayland-dev libwayland-bin wayland-protocols libffi-dev \
-            curl aria2 unzip xz-utils python3
+            curl aria2 unzip xz-utils python3 \
+            alsa-utils libasound2-plugins pulseaudio-utils
 
       - name: Build the helper programs
         run: |

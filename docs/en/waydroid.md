@@ -24,7 +24,8 @@ Droidspaces container
 | Keyboard | Hardware keys are forwarded. Use Android's own on-screen keyboard for typing. |
 | Mouse | A left click or drag is delivered as a finger tap or swipe. No pointer, no wheel. |
 | GPU acceleration | Not available yet. |
-| Sound | Through the PulseAudio server Droidspaces runs in Termux (**Configure PulseAudio**, see below). |
+| Sound | Plays from the Anland app, through Anland's own audio channel like a Linux desktop on Anland. No Termux or PulseAudio setup is needed. |
+| Microphone | Not available yet. |
 | Camera, sensors, clipboard | Not available. |
 | Network | Droidspaces' NAT network; Android gets its address by DHCP like on a Waydroid host. |
 
@@ -57,7 +58,7 @@ sudo ./waydroid/build-waydroid-rootfs.sh
    - turn **privileged mode** on with `nocaps` and `noseccomp`;
    - turn **SELinux permissive** on;
    - keep the network on **NAT** (in host mode Android would rewrite the phone's routing, so it gets no network there);
-   - for sound, turn **Configure PulseAudio** on. It needs Termux with Droidspaces' one-time setup script, described in Droidspaces' [Display, audio and desktop](https://github.com/ravindu644/Droidspaces-OSS/blob/main/Documentation/Graphics-and-Audio.md#one-time-setup-on-android) guide;
+   - keep **Configure PulseAudio** off, as Anland recommends: sound goes through the Anland app;
    - leave the init program at its default (`/sbin/init`).
 3. Start the container, then use **Launch Anland**.
 
@@ -110,7 +111,6 @@ Once Android is up, `logcat` works from a shell in the container. For network or
 | `network: there is no eth0` | The container has no network of its own. Set the network mode to **NAT**. |
 | `network: the container shares the phone's network` | The network mode is host. Set it to **NAT**. |
 | `/proc/sys/net is read-only` | Android cannot bring its network up. Include this report when asking for help. |
-| `sound: no PulseAudio socket` | **Configure PulseAudio** is off, or PulseAudio in Termux did not start (see the container log in the Droidspaces app). Android runs without sound. Music and video apps may also refuse to play, because they wait for an audio output. |
 
 When reporting a problem, the easiest way is the Droidspaces app's **Generate a bug report**. It writes one archive to the phone's storage with the container log (which holds the `/sbin/init` report), the kernel log, and the kernel's record of the last crash if the phone restarted.
 
@@ -119,7 +119,7 @@ When reporting a problem, the easiest way is the Droidspaces app's **Generate a 
 Waydroid normally needs its Python tools and LXC on a Linux host. Here two small static programs take their place:
 
 - **`ds-waydroid-init`** (`/sbin/init`) builds a clean `/dev` with a private binder instance, hides the phone's kernel command line from the guest, writes `/vendor/waydroid.prop` from the settings file and then executes Android's `/init`, which stays PID 1.
-- **`anland-waydroid-bridge`** is a minimal Wayland compositor. Waydroid's hardware composer is a Wayland client; the bridge accepts its frames, copies them into the buffer the Anland app selected and turns Anland input into Wayland input. It links Anland's `libdisplay_producer`, so the binary is GPL-3.0.
+- **`anland-waydroid-bridge`** is a minimal Wayland compositor. Waydroid's hardware composer is a Wayland client; the bridge accepts its frames, copies them into the buffer the Anland app selected and turns Anland input into Wayland input. It also answers as the PulseAudio server that Waydroid's audio HAL connects to (`/run/xdg/pulse/native`), mixes what Android plays and sends it over Anland's audio channel to the app's speaker. It links Anland's `libdisplay_producer`, so the binary is GPL-3.0.
 
 Nothing in the Android image is modified; the files above are added to it.
 
@@ -139,7 +139,7 @@ Rootfs archives built before this was added do not have these protections. Do no
 
 On an x86-64 Linux machine, with the scripts in `waydroid/tests/`:
 
-- `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks picture colours, scaling, touch and key delivery, and switching size when the app connects late.
+- `run-bridge-test.sh`: the real Anland daemon, a stand-in for the Anland app and a stand-in for the Waydroid composer. Checks picture colours, scaling, touch and key delivery, and switching size when the app connects late. It also plays a tone through `aplay -D pulse` (the ALSA plugin Waydroid's audio HAL uses) and checks that it reaches the app whole, in real time, in pitch and at its volume.
 - `run-init-test.sh`: `ds-waydroid-init` inside a real Droidspaces container in default, hardware-access and privileged mode, with a stand-in that makes the same calls as Waydroid's first-stage init.
 - The real ARM64 rootfs was booted in Droidspaces under CPU emulation. Android's init ran both stages, loaded the generated properties and started the bridge, then stopped at the first service that needs binder.
 

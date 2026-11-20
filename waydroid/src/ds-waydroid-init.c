@@ -787,45 +787,6 @@ static void protect_host(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Sound                                                                     */
-/* ------------------------------------------------------------------------- */
-
-/* Waydroid's audio HAL is a PulseAudio client. On a Linux host Waydroid puts
- * the user's PulseAudio socket at /run/xdg/pulse/native (the directory named by
- * waydroid.pulse_runtime_path). Droidspaces, with "Configure PulseAudio" on,
- * runs PulseAudio in Termux and bind-mounts its socket to /tmp/.pulse-socket.
- * Put that socket where the HAL looks. Must run before /tmp is replaced. */
-#define DS_PULSE_SOCKET   "/tmp/.pulse-socket"
-#define HAL_PULSE_DIR     "/run/xdg/pulse"
-#define HAL_PULSE_SOCKET  HAL_PULSE_DIR "/native"
-
-static void setup_audio(void)
-{
-    struct stat st;
-    mkdir(HAL_PULSE_DIR, 0755);
-    chmod(HAL_PULSE_DIR, 0755);
-    umount2(HAL_PULSE_SOCKET, MNT_DETACH); /* left over from a previous boot */
-
-    if (stat(DS_PULSE_SOCKET, &st) < 0 || !S_ISSOCK(st.st_mode)) {
-        unlink(HAL_PULSE_SOCKET);
-        WARN("sound: no PulseAudio socket at %s, Android will be silent.", DS_PULSE_SOCKET);
-        WARN("sound: turn on \"Configure PulseAudio\" for this container in Droidspaces");
-        WARN("sound: (it needs Termux with Droidspaces' setup script, see the documentation).");
-        return;
-    }
-    if (lstat(HAL_PULSE_SOCKET, &st) == 0 && !S_ISREG(st.st_mode))
-        unlink(HAL_PULSE_SOCKET);
-    if (touch(HAL_PULSE_SOCKET) < 0 ||
-        mount(DS_PULSE_SOCKET, HAL_PULSE_SOCKET, NULL, MS_BIND, NULL) < 0) {
-        WARN("sound: cannot place the PulseAudio socket at %s: %s", HAL_PULSE_SOCKET,
-             strerror(errno));
-        return;
-    }
-    INFO("sound: PulseAudio from Droidspaces is connected to Android's audio (%s)",
-         HAL_PULSE_SOCKET);
-}
-
-/* ------------------------------------------------------------------------- */
 /* Handing over to Android                                                   */
 /* ------------------------------------------------------------------------- */
 
@@ -959,8 +920,6 @@ static void describe_environment(void)
     report_dir("network interfaces", "/sys/class/net");
     if (!exists("/sys/class/net/eth0"))
         WARN("network: there is no eth0, Android will have no network. Set the network mode to NAT.");
-    INFO("PulseAudio socket from Droidspaces (%s): %s", DS_PULSE_SOCKET,
-         exists(DS_PULSE_SOCKET) ? "present" : "absent");
     INFO("/dev/kgsl-3d0: %s", exists("/dev/kgsl-3d0") ? "present" : "absent");
     report_dir("/dev/dri", "/dev/dri");
     report_dir("/dev/dma_heap", "/dev/dma_heap");
@@ -1023,12 +982,11 @@ int main(int argc, char **argv)
     if (!exists("/sys/kernel") && mount("sysfs", "/sys", "sysfs", MS_RDONLY, NULL) < 0)
         WARN("/sys is not mounted and could not be mounted: %s", strerror(errno));
 
-    /* Where the bridge puts its Wayland socket for the Android composer, and
-     * where Android's audio finds PulseAudio. */
+    /* Where the bridge puts its Wayland socket for the Android composer and
+     * the PulseAudio socket for Android's audio. */
     mkdir("/run", 0755);
     mkdir("/run/xdg", 0777);
     chmod("/run/xdg", 0777);
-    setup_audio();
 
     if (!is_mountpoint("/tmp") &&
         mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777") < 0) {

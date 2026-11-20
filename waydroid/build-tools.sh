@@ -145,6 +145,7 @@ log "Building anland-waydroid-bridge"
   -I"$ANLAND_SRC/libdisplay_producer" -I"$ANLAND_SRC/common" \
   -o "$OUT_DIR/anland-waydroid-bridge" \
   "$SCRIPT_DIR/src/anland-waydroid-bridge.c" \
+  "$SCRIPT_DIR/src/pulse-server.c" \
   "$GEN_DIR/xdg-shell-protocol.c" \
   "$ANLAND_SRC/libdisplay_producer/display_producer.c" \
   "$ANLAND_SRC/common/socket_utils.c" \

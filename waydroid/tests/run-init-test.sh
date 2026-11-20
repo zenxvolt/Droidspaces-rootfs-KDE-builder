@@ -84,7 +84,6 @@ common_checks() {
   check "memfd is enabled when ashmem is absent" has "^prop sys.use_memfd=true" "$MOCK"
   check "Android cannot change the host's kernel settings" has "^can change kernel settings (/proc/sys): no" "$MOCK"
   check "Android can change its own network settings (needed to bring eth0 up)" has "^can change network settings (/proc/sys/net): YES" "$MOCK"
-  check "a missing PulseAudio socket is reported" has "sound: no PulseAudio socket" "$BOOT"
   check "Android cannot trigger sysrq (kernel crash, reboot)" has "^can trigger sysrq: no" "$MOCK"
   check "Android cannot write to the host's /sys" has "^can write to /sys: no" "$MOCK"
   # Bounding set: sys_module (bit 16) and sys_rawio (bit 17) gone, sys_admin (21) and sys_boot (22) kept.

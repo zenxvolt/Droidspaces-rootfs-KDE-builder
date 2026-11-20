@@ -24,7 +24,8 @@ Container Droidspaces
 | Keyboard | Tombol fisik diteruskan. Untuk mengetik, pakai keyboard layar milik Android. |
 | Mouse | Klik kiri atau seret diteruskan sebagai ketukan atau usapan jari. Tidak ada kursor dan roda gulir. |
 | Akselerasi GPU | Belum ada. |
-| Suara | Lewat server PulseAudio yang dijalankan Droidspaces di Termux (**Configure PulseAudio**, lihat di bawah). |
+| Suara | Keluar dari aplikasi Anland, lewat kanal audio milik Anland sendiri seperti desktop Linux di Anland. Tidak perlu Termux atau pengaturan PulseAudio. |
+| Mikrofon | Belum ada. |
 | Kamera, sensor, clipboard | Belum ada. |
 | Jaringan | Jaringan NAT Droidspaces; Android mendapat alamat lewat DHCP seperti di host Waydroid biasa. |
 
@@ -57,7 +58,7 @@ sudo ./waydroid/build-waydroid-rootfs.sh
    - nyalakan **mode privileged** dengan `nocaps` dan `noseccomp`;
    - nyalakan **SELinux permissive**;
    - biarkan jaringan di **NAT** (di mode host Android akan mengubah routing ponsel, jadi di sana Android tidak diberi jaringan);
-   - untuk suara, nyalakan **Configure PulseAudio**. Ini butuh Termux yang sudah menjalankan skrip setup sekali-jalan dari Droidspaces, dijelaskan di panduan [Display, audio and desktop](https://github.com/ravindu644/Droidspaces-OSS/blob/main/Documentation/Graphics-and-Audio.md#one-time-setup-on-android) milik Droidspaces;
+   - biarkan **Configure PulseAudio** mati, sesuai saran Anland: suara lewat aplikasi Anland;
    - biarkan program init pada bawaannya (`/sbin/init`).
 3. Jalankan container, lalu tekan **Launch Anland**.
 
@@ -110,7 +111,6 @@ Setelah Android menyala, `logcat` bisa dipakai dari shell di dalam container. Un
 | `network: there is no eth0` | Container tidak punya jaringan sendiri. Setel mode jaringan ke **NAT**. |
 | `network: the container shares the phone's network` | Mode jaringan adalah host. Setel ke **NAT**. |
 | `/proc/sys/net is read-only` | Android tidak bisa menyalakan jaringannya. Sertakan laporan ini saat meminta bantuan. |
-| `sound: no PulseAudio socket` | **Configure PulseAudio** mati, atau PulseAudio di Termux tidak menyala (lihat log container di aplikasi Droidspaces). Android berjalan tanpa suara. Aplikasi musik dan video juga bisa menolak memutar karena menunggu keluaran audio. |
 
 Saat melaporkan masalah, cara termudah adalah **Generate a bug report** di aplikasi Droidspaces. Ia menulis satu arsip ke penyimpanan ponsel berisi log container (yang memuat laporan `/sbin/init`), log kernel, dan catatan kernel tentang crash terakhir bila ponsel sempat restart.
 
@@ -119,7 +119,7 @@ Saat melaporkan masalah, cara termudah adalah **Generate a bug report** di aplik
 Waydroid biasanya butuh alat Python-nya dan LXC di host Linux. Di sini dua program statis kecil menggantikannya:
 
 - **`ds-waydroid-init`** (`/sbin/init`) membuat `/dev` yang bersih dengan instance binder privat, menyembunyikan command line kernel ponsel dari Android tamu, menulis `/vendor/waydroid.prop` dari berkas pengaturan, lalu menjalankan `/init` milik Android yang tetap menjadi PID 1.
-- **`anland-waydroid-bridge`** adalah compositor Wayland minimal. Hardware composer Waydroid adalah klien Wayland; jembatan ini menerima frame-nya, menyalinnya ke buffer yang dipilih aplikasi Anland, dan mengubah input Anland menjadi input Wayland. Program ini memakai `libdisplay_producer` milik Anland, jadi binernya berlisensi GPL-3.0.
+- **`anland-waydroid-bridge`** adalah compositor Wayland minimal. Hardware composer Waydroid adalah klien Wayland; jembatan ini menerima frame-nya, menyalinnya ke buffer yang dipilih aplikasi Anland, dan mengubah input Anland menjadi input Wayland. Ia juga berperan sebagai server PulseAudio yang disambungi HAL audio Waydroid (`/run/xdg/pulse/native`), mencampur suara yang diputar Android, lalu mengirimnya lewat kanal audio Anland ke speaker aplikasi. Program ini memakai `libdisplay_producer` milik Anland, jadi binernya berlisensi GPL-3.0.
 
 Tidak ada isi image Android yang diubah; berkas-berkas di atas hanya ditambahkan.
 
@@ -139,7 +139,7 @@ Arsip rootfs yang dibangun sebelum ini ditambahkan tidak punya perlindungan ters
 
 Di mesin Linux x86-64, dengan skrip di `waydroid/tests/`:
 
-- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna gambar, penskalaan, sampainya sentuhan dan tombol, serta pergantian ukuran saat aplikasi tersambung belakangan.
+- `run-bridge-test.sh`: daemon Anland asli, tiruan aplikasi Anland, dan tiruan composer Waydroid. Memeriksa warna gambar, penskalaan, sampainya sentuhan dan tombol, serta pergantian ukuran saat aplikasi tersambung belakangan. Tes ini juga memutar nada lewat `aplay -D pulse` (plugin ALSA yang dipakai HAL audio Waydroid) dan memeriksa nada itu sampai ke aplikasi utuh, tepat waktu, dengan nada dan volume yang benar.
 - `run-init-test.sh`: `ds-waydroid-init` di dalam container Droidspaces sungguhan pada mode biasa, akses hardware, dan privileged, dengan tiruan yang melakukan pemanggilan yang sama seperti init tahap pertama Waydroid.
 - Rootfs ARM64 asli di-boot di Droidspaces lewat emulasi CPU. Init Android menjalankan kedua tahapnya, memuat properti yang dibuat, dan menyalakan jembatan, lalu berhenti di layanan pertama yang butuh binder.
 
