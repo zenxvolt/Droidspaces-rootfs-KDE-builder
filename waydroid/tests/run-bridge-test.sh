@@ -250,9 +250,20 @@ with open(sys.argv[1], 'wb') as f:
 PY
   "$T/display_daemon" "$d/display.sock" >"$d/daemon.log" 2>&1 & dpid=$!; PIDS+=("$dpid")
   sleep 0.3
-  "$BRIDGE" --anland_socket "$d/display.sock" --runtime_dir "$d/xdg" --log "$d/bridge.log" \
-    --pulse_socket "$d/xdg/pulse/native" --verbose 1 >"$d/bridge.out" 2>&1 & bpid=$!; PIDS+=("$bpid")
+  # Android's init starts services with umask 077; the audio HAL connects as
+  # the unprivileged user audioserver.
+  chmod 0755 "$T" "$d"
+  (umask 077; exec "$BRIDGE" --anland_socket "$d/display.sock" --runtime_dir "$d/xdg" \
+    --log "$d/bridge.log" --pulse_socket "$d/xdg/pulse/native" --verbose 1) \
+    >"$d/bridge.out" 2>&1 & bpid=$!; PIDS+=("$bpid")
   sleep 0.3
+  check "the PulseAudio directory is open to other users despite umask 077" \
+    test "$(stat -c %a "$d/xdg/pulse")" = 755
+  if command -v setpriv >/dev/null; then
+    check "a non-root user can connect to the PulseAudio socket" \
+      setpriv --reuid=65534 --regid=65534 --clear-groups python3 -c \
+        "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])" "$d/xdg/pulse/native"
+  fi
   "$T/fake-app" "$d/display.sock" 320 480 0 "$d/frame" "$d/received.raw" 4 >"$d/app.log" 2>&1 & apid=$!
   PIDS+=("$apid")
   sleep 1

@@ -1490,12 +1490,16 @@ static int mkdir_parents(const char *path)
         if (*p != '/')
             continue;
         *p = 0;
-        mkdir(tmp, 0755);
+        if (mkdir(tmp, 0755) == 0)
+            chmod(tmp, 0755);   /* the umask may have taken bits away */
         *p = '/';
     }
     if (mkdir(tmp, 0755) < 0 && errno != EEXIST)
         return -1;
-    return 0;
+    /* Android's init starts services with umask 077, which would leave the
+     * directory 0700 and keep the audio HAL (user audioserver) out of it.
+     * The directory is ours either way, so set its mode explicitly. */
+    return chmod(tmp, 0755);
 }
 
 struct pulse_server *pulse_server_new(struct wl_event_loop *loop, const char *socket_path,
