@@ -75,6 +75,7 @@ phosh-anland
 | `PHOC_INI` | `/etc/phosh/phoc.ini`, else `/usr/share/phosh/phoc.ini` | phoc configuration. A `scale=` line in an `[output:ANLAND-1]` section also sets the scale. |
 | `ANLAND_SOCKET` | `/run/display.sock` | Anland daemon socket. |
 | `ANLAND_DRM_DEVICE` | `/dev/dri/renderD128` | GPU render node. |
+| `PHOC_ANLAND_ALLOW_YUV` | unset | `1` lets apps hand phoc YUV (video) buffers again; see the Video row below. |
 
 The launcher refuses to start while another Anland desktop of the same user is running.
 
@@ -88,6 +89,7 @@ The launcher refuses to start while another Anland desktop of the same user is r
 | Text from the Android keyboard | Sent to the app through text-input-v3 when it has one, otherwise typed as key presses. **Not tested yet.** |
 | Clipboard, audio | Provided by the Anland backend as in Mango. **Not tested yet.** |
 | Night Light | Ignored: Anland cannot apply gamma tables. |
+| Video | phoc-anland does not offer YUV buffer formats to apps, so browsers and players convert video to RGB themselves. With YUV offered, YouTube in Chrome showed green and magenta colours on an Adreno 725 phone. |
 | Rotation | The Anland app reports a new screen size and phoc follows it. **Not tested yet.** |
 | Calls, SMS, mobile data, sensors | Not available inside a container. ModemManager is removed. |
 | Fedora 43 | Not supported: it ships phoc 0.54 on wlroots 0.19, which this patch does not target. |

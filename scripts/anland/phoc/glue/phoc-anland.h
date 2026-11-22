@@ -9,6 +9,7 @@ typedef struct _PhocServer PhocServer;
 struct wl_event_loop;
 struct wlr_backend;
 struct wlr_output;
+struct wlr_linux_dmabuf_feedback_v1;
 
 /*
  * Create the Anland backend for @server. The backend reaches the server's
@@ -24,3 +25,10 @@ struct wlr_backend *phoc_anland_backend_create      (PhocServer           *serve
  * 360 logical pixels; PHOC_ANLAND_SCALE or a scale= line in phoc.ini wins.
  */
 float               phoc_anland_output_compute_scale (struct wlr_output *output);
+
+/*
+ * Drop YUV formats from linux-dmabuf feedback while running on Anland, so
+ * clients do not hand the compositor buffers the driver converts wrongly.
+ * Does nothing on other backends.
+ */
+void                phoc_anland_filter_dmabuf_feedback (struct wlr_linux_dmabuf_feedback_v1 *feedback);

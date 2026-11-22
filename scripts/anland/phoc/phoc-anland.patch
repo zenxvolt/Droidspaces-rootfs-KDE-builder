@@ -147,7 +147,7 @@ index d95d6db..804dc1c 100644
      g_message ("Output '%s' has invalid physical size, "
                 "using default scale", self->wlr_output->name);
 diff --git a/src/server.c b/src/server.c
-index 6d730bb..5fcdd47 100644
+index 6d730bb..6c36bc6 100644
 --- a/src/server.c
 +++ b/src/server.c
 @@ -20,6 +20,9 @@
@@ -178,3 +178,40 @@ index 6d730bb..5fcdd47 100644
    self->backend = wlr_backend_autocreate (wl_display_get_event_loop (self->wl_display),
                                            &self->session);
    if (self->backend == NULL) {
+@@ -466,9 +480,26 @@ phoc_server_initable_init (GInitable    *initable,
+ 
+   if (wlr_renderer_get_texture_formats (wlr_renderer, WLR_BUFFER_CAP_DMABUF)) {
+     wlr_drm_create (self->wl_display, wlr_renderer);
++#ifdef HAVE_ANLAND
++    /* Same as wlr_linux_dmabuf_v1_create_with_renderer(), minus the YUV
++     * formats the Anland setup cannot display. */
++    struct wlr_linux_dmabuf_feedback_v1 feedback = { 0 };
++    const struct wlr_linux_dmabuf_feedback_v1_init_options options = {
++      .main_renderer = wlr_renderer,
++    };
++
++    if (wlr_linux_dmabuf_feedback_v1_init_with_options (&feedback, &options)) {
++      phoc_anland_filter_dmabuf_feedback (&feedback);
++      self->linux_dmabuf_v1 = wlr_linux_dmabuf_v1_create (self->wl_display,
++                                                          PHOC_LINUX_DMABUF_VERSION,
++                                                          &feedback);
++      wlr_linux_dmabuf_feedback_v1_finish (&feedback);
++    }
++#else
+     self->linux_dmabuf_v1 = wlr_linux_dmabuf_v1_create_with_renderer (self->wl_display,
+                                                                       PHOC_LINUX_DMABUF_VERSION,
+                                                                       wlr_renderer);
++#endif
+   } else {
+     g_message ("Linux dmabuf support unavailable");
+   }
+@@ -1039,6 +1070,9 @@ phoc_server_set_linux_dmabuf_surface_feedback (PhocServer *self,
+     if (!wlr_linux_dmabuf_feedback_v1_init_with_options (&feedback, &options))
+       return;
+ 
++#ifdef HAVE_ANLAND
++    phoc_anland_filter_dmabuf_feedback (&feedback);
++#endif
+     wlr_linux_dmabuf_v1_set_surface_feedback (self->linux_dmabuf_v1, view->wlr_surface, &feedback);
+     wlr_linux_dmabuf_feedback_v1_finish (&feedback);
+   } else {

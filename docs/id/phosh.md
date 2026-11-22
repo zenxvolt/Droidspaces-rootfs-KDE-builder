@@ -75,6 +75,7 @@ phosh-anland
 | `PHOC_INI` | `/etc/phosh/phoc.ini`, atau `/usr/share/phosh/phoc.ini` | Konfigurasi phoc. Baris `scale=` di bagian `[output:ANLAND-1]` juga mengatur skala. |
 | `ANLAND_SOCKET` | `/run/display.sock` | Socket daemon Anland. |
 | `ANLAND_DRM_DEVICE` | `/dev/dri/renderD128` | Render node GPU. |
+| `PHOC_ANLAND_ALLOW_YUV` | tidak diset | `1` mengizinkan aplikasi mengirim buffer YUV (video) ke phoc lagi; lihat baris Video di bawah. |
 
 Peluncur menolak berjalan bila desktop Anland lain milik pengguna yang sama sedang aktif.
 
@@ -88,6 +89,7 @@ Peluncur menolak berjalan bila desktop Anland lain milik pengguna yang sama seda
 | Teks dari keyboard Android | Dikirim lewat text-input-v3 bila aplikasinya mendukung, jika tidak diketik sebagai penekanan tombol. **Belum diuji.** |
 | Clipboard, audio | Disediakan backend Anland seperti di Mango. **Belum diuji.** |
 | Night Light | Diabaikan: Anland tidak bisa menerapkan tabel gamma. |
+| Video | phoc-anland tidak menawarkan format buffer YUV ke aplikasi, jadi browser dan pemutar video mengonversi video ke RGB sendiri. Saat YUV ditawarkan, YouTube di Chrome tampil hijau-magenta di ponsel Adreno 725. |
 | Rotasi | Aplikasi Anland melaporkan ukuran layar baru dan phoc mengikutinya. **Belum diuji.** |
 | Telepon, SMS, data seluler, sensor | Tidak tersedia di dalam container. ModemManager dihapus. |
 | Fedora 43 | Tidak didukung: Fedora 43 memakai phoc 0.54 dengan wlroots 0.19, yang tidak menjadi sasaran patch ini. |

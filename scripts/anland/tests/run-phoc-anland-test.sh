@@ -86,8 +86,9 @@ printf '[core]\nxwayland=false\n' > "$T/phoc.ini"
 echo "== phoc-anland shows a client in the Anland app"
 "$T/display_daemon" "$T/display.sock" > "$T/daemon.log" 2>&1 & DPID=$!; PIDS+=("$DPID")
 sleep 0.5
-# The "app" is open first, as on a phone; it waits up to 600 frames for a picture.
-"$T/fake-app" "$NODE" "$T/display.sock" "$WIDTH" "$HEIGHT" 600 "$T/frame" > "$T/app.log" 2>&1 & APID=$!
+# The "app" is open first, as on a phone. phoc draws its empty desktop much
+# faster than 60 fps here, so allow plenty of frames for the client to appear.
+"$T/fake-app" "$NODE" "$T/display.sock" "$WIDTH" "$HEIGHT" 5000 "$T/frame" > "$T/app.log" 2>&1 & APID=$!
 PIDS+=("$APID")
 sleep 1
 env -u WAYLAND_DISPLAY -u DISPLAY XDG_RUNTIME_DIR="$T/xdg" ANLAND_SOCKET="$T/display.sock" \

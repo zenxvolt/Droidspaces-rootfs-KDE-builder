@@ -21,6 +21,8 @@
 #include "seat.h"
 #include "server.h"
 
+#include <wlr/types/wlr_linux_dmabuf_v1.h>
+
 #include <math.h>
 #include <string.h>
 
@@ -219,4 +221,73 @@ phoc_anland_output_compute_scale (struct wlr_output *output)
   /* Quarter steps keep text sharp and match what phosh-mobile-settings offers. */
   scale = floor (shortest / PHOC_ANLAND_DESIGN_WIDTH * 4.0) / 4.0;
   return CLAMP (scale, 1.0, 4.0);
+}
+
+
+static bool
+is_yuv_format (uint32_t format)
+{
+  switch (format) {
+  case DRM_FORMAT_NV12: case DRM_FORMAT_NV21: case DRM_FORMAT_NV16: case DRM_FORMAT_NV61:
+  case DRM_FORMAT_NV24: case DRM_FORMAT_NV42:
+  case DRM_FORMAT_P010: case DRM_FORMAT_P012: case DRM_FORMAT_P016:
+  case DRM_FORMAT_YUV410: case DRM_FORMAT_YVU410: case DRM_FORMAT_YUV411: case DRM_FORMAT_YVU411:
+  case DRM_FORMAT_YUV420: case DRM_FORMAT_YVU420: case DRM_FORMAT_YUV422: case DRM_FORMAT_YVU422:
+  case DRM_FORMAT_YUV444: case DRM_FORMAT_YVU444:
+  case DRM_FORMAT_YUYV: case DRM_FORMAT_YVYU: case DRM_FORMAT_UYVY: case DRM_FORMAT_VYUY:
+  case DRM_FORMAT_AYUV: case DRM_FORMAT_XYUV8888:
+#ifdef DRM_FORMAT_P210
+  case DRM_FORMAT_P210:
+#endif
+#ifdef DRM_FORMAT_P030
+  case DRM_FORMAT_P030:
+#endif
+#ifdef DRM_FORMAT_NV15
+  case DRM_FORMAT_NV15:
+#endif
+#ifdef DRM_FORMAT_Y210
+  case DRM_FORMAT_Y210: case DRM_FORMAT_Y212: case DRM_FORMAT_Y216:
+  case DRM_FORMAT_Y410: case DRM_FORMAT_Y412: case DRM_FORMAT_Y416:
+#endif
+#ifdef DRM_FORMAT_VUY888
+  case DRM_FORMAT_VUY888: case DRM_FORMAT_VUY101010:
+#endif
+    return true;
+  default:
+    return false;
+  }
+}
+
+/*
+ * wlroots hands YUV buffers (NV12, ...) to the driver as "external" EGL
+ * images and lets it convert them to RGB while sampling. On Adreno with the
+ * kgsl Mesa driver that conversion comes out with wrong colours, so video in
+ * Chrome turned green and magenta. Without YUV in the advertised formats,
+ * clients convert to RGB themselves, which they all can.
+ */
+void
+phoc_anland_filter_dmabuf_feedback (struct wlr_linux_dmabuf_feedback_v1 *feedback)
+{
+  struct wlr_linux_dmabuf_feedback_v1_tranche *tranche;
+
+  if (attached_backend == NULL || feedback == NULL)
+    return;
+  /* For drivers that do convert YUV correctly, and for comparing. */
+  if (g_strcmp0 (g_getenv ("PHOC_ANLAND_ALLOW_YUV"), "1") == 0)
+    return;
+
+  wl_array_for_each (tranche, &feedback->tranches) {
+    struct wlr_drm_format_set rgb = { 0 };
+
+    for (size_t i = 0; i < tranche->formats.len; i++) {
+      const struct wlr_drm_format *format = &tranche->formats.formats[i];
+
+      if (is_yuv_format (format->format))
+        continue;
+      for (size_t j = 0; j < format->len; j++)
+        wlr_drm_format_set_add (&rgb, format->format, format->modifiers[j]);
+    }
+    wlr_drm_format_set_finish (&tranche->formats);
+    tranche->formats = rgb;
+  }
 }
