@@ -33,6 +33,9 @@ COPY scripts/tui/install-anland-hyprland.sh /usr/local/sbin/install-anland-hyprl
 COPY scripts/tui/install-anland-mango.sh /usr/local/sbin/install-anland-mango
 COPY scripts/tui/install-anland-denial.sh /usr/local/sbin/install-anland-denial
 COPY scripts/install-anland-desktop.sh /usr/local/sbin/install-anland-desktop
+# Phosh 没有预编译的 Anland 包：构建时编译 phoc-anland（见 scripts/anland/）。
+COPY scripts/anland/install-anland-phosh.sh /usr/local/sbin/install-anland-phosh
+COPY scripts/anland/ /usr/local/lib/droidspaces/anland/
 COPY scripts/tui/install-mesa.sh /usr/local/sbin/install-mesa
 COPY scripts/tui/install-hangover-wine.sh /usr/local/sbin/install-hangover-wine
 COPY scripts/tui/install-winefonts.sh /usr/local/sbin/install-winefonts
@@ -395,10 +398,11 @@ RUN rm -f \
         /usr/local/sbin/configure-desktop \
         /usr/local/sbin/install-desktop \
         /usr/local/sbin/install-anland-desktop \
+        /usr/local/sbin/install-anland-phosh \
         /usr/local/sbin/install-droidspaces-usb-manager \
         /usr/local/sbin/systemd257 \
         /usr/local/sbin/nosnap && \
-    rm -rf /usr/local/lib/droidspaces/desktops && \
+    rm -rf /usr/local/lib/droidspaces/desktops /usr/local/lib/droidspaces/anland && \
     dnf clean all && \
     rm -rf /var/cache/dnf/* /tmp/* /var/tmp/*
 

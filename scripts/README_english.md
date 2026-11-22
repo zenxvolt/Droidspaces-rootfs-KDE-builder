@@ -22,6 +22,7 @@ This directory contains installers used while building the RootFS, maintenance t
 | `tui/install-anland-next.sh` | ARM64 Debian/Ubuntu/Fedora/Arch container | Installs the Anland Next session package (mini-wm + patched Xwayland + patched bubblewrap). |
 | `tui/install-anland-niri.sh` | ARM64 Debian 13, Ubuntu 26, Fedora 43/44, and Arch container | Installs Anland Niri and its shared patched Xwayland package. |
 | `tui/install-anland-hyprland.sh`, `install-anland-mango.sh`, `install-anland-denial.sh` | ARM64 Debian 13, Ubuntu 26, Fedora 43/44, and Arch container | Installs the compositor and its patched Xwayland package. |
+| `anland/install-anland-phosh.sh`, `anland/build-phoc-anland.sh` | Fedora 44 RootFS build environment | No prebuilt package exists for Phosh: compiles phoc with the Anland backend (`/usr/libexec/phoc-anland`), installs the `phosh-anland` launcher and removes the toolchain. See [Phosh](../docs/en/phosh.md). |
 | `install-anland-desktop.sh` | RootFS build environment | Dispatches a desktop slug to KDE, GNOME, Niri, Hyprland, Mango, Denial, or Anland Next. |
 | `lib/anland-build.sh` | RootFS build host | Resolves the Anland package family, Release tag, and revision for native/QEMU builds. |
 | `install-usb-manager.sh` | Linux container | Installs Droidspaces USB Manager, distribution dependencies, launchers, and user permissions. |

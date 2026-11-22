@@ -17,6 +17,7 @@ When `desktop_autostart` is enabled, the RootFS installs `desktop-session.servic
 | Hyprland | `/usr/bin/hyprland-anland` |
 | Mango | `/usr/bin/mango-anland` |
 | Denial | `/usr/bin/denial-anland` |
+| Phosh (Fedora 44) | `/usr/bin/phosh-anland` |
 
 After an unexpected exit, systemd retries after 2 seconds. More than 5 failures within 60 seconds pauses retries. A normal exit does not restart the session.
 

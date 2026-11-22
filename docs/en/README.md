@@ -7,6 +7,7 @@
 - [Desktop startup and Anland Wayland setup](desktop-and-anland.md)
 - [TUI, USB, firmware, and local builds](advanced-usage.md)
 - [Waydroid (Android) as a RootFS, shown through Anland — experimental](waydroid.md)
+- [Phosh phone shell on Fedora 44, shown through Anland — experimental](phosh.md)
 - [Script maintenance guide](../../scripts/README_english.md)
 
 ## Screenshots

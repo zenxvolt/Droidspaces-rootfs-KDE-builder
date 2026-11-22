@@ -20,6 +20,8 @@ case "${DESKTOP:-}:${DISPLAY_BACKEND:-}" in
     hyprland:anland-wayland) command_line='exec /usr/bin/hyprland-anland' ;;
     mango:anland-wayland) command_line='exec /usr/bin/mango-anland' ;;
     denial:anland-wayland) command_line='exec /usr/bin/denial-anland' ;;
+    # phosh-anland 是以 phoc-anland 为合成器的 phosh-session。
+    phosh:anland-wayland) command_line='exec /usr/bin/phosh-anland' ;;
     *)
         echo "不支持的桌面会话：${DESKTOP:-未设置}/${DISPLAY_BACKEND:-未设置}" >&2
         exit 1

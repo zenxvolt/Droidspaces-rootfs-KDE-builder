@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Start a Phosh session in the Anland Android app.
+#
+# This is phosh-session with phoc-anland as the compositor. It runs in the
+# foreground and never stops another desktop or changes system services.
+#
+# Usage: phosh-anland [--check|--help]
+#   --check  verify the binary, socket and render node without starting
+#
+# Environment:
+#   ANLAND_SOCKET      Anland daemon socket (default /run/display.sock)
+#   ANLAND_DRM_DEVICE  render node (default /dev/dri/renderD128)
+#   PHOC_ANLAND_SCALE  output scale, e.g. 2.5 (default: fit 360 px width)
+#   PHOC_INI           phoc configuration file
+set -uo pipefail
+
+COMPOSITOR=${PHOC_ANLAND:-/usr/libexec/phoc-anland}
+SESSION_COMMAND=${PHOSH_SESSION_COMMAND:-gnome-session --session=phosh}
+
+die() { printf 'phosh-anland: %s\n' "$*" >&2; exit 1; }
+
+case "${1:-start}" in
+    start|--check) ;;
+    --help|-h) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die 'usage: phosh-anland [--check|--help]' ;;
+esac
+
+[[ -x "$COMPOSITOR" ]] || die "compositor not installed: $COMPOSITOR"
+
+export ANLAND=1
+export ANLAND_SOCKET=${ANLAND_SOCKET:-/run/display.sock}
+export ANLAND_DRM_DEVICE=${ANLAND_DRM_DEVICE:-/dev/dri/renderD128}
+export WLR_RENDER_DRM_DEVICE=${WLR_RENDER_DRM_DEVICE:-$ANLAND_DRM_DEVICE}
+export XWAYLAND_GBM_DEVICE=${XWAYLAND_GBM_DEVICE:-$ANLAND_DRM_DEVICE}
+# The kgsl Mesa driver can report itself as a software EGL device even on the
+# GPU. Follow the other Anland sessions and allow it only for that driver.
+if [[ ${MESA_LOADER_DRIVER_OVERRIDE:-} == kgsl || ${GALLIUM_DRIVER:-} == kgsl ]]; then
+    export WLR_RENDERER_ALLOW_SOFTWARE=${WLR_RENDERER_ALLOW_SOFTWARE:-1}
+fi
+
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=Phosh:GNOME
+export XDG_SESSION_DESKTOP=phosh
+
+if [[ -z ${PHOC_INI:-} ]]; then
+    PHOC_INI=/usr/share/phosh/phoc.ini
+    [[ ! -f /etc/phosh/phoc.ini ]] || PHOC_INI=/etc/phosh/phoc.ini
+fi
+[[ -r "$PHOC_INI" ]] || die "phoc configuration is not readable: $PHOC_INI"
+
+[[ -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]] ||
+    die "runtime directory must exist and be owned by you: $XDG_RUNTIME_DIR"
+
+if [[ "${1:-}" == --check ]]; then
+    [[ -S "$ANLAND_SOCKET" ]] || die "Anland socket unavailable: $ANLAND_SOCKET (is the Anland app running?)"
+    [[ -r "$ANLAND_DRM_DEVICE" && -w "$ANLAND_DRM_DEVICE" ]] || die "render node unavailable: $ANLAND_DRM_DEVICE"
+    if ldd "$COMPOSITOR" | grep 'not found'; then die 'runtime library missing'; fi
+    version=unknown
+    [[ ! -r /usr/share/phoc-anland/version ]] || version=$(tr '\n' ' ' < /usr/share/phoc-anland/version)
+    printf 'PHOSH_ANLAND_PREFLIGHT_OK (%s)\n' "$version"
+    exit 0
+fi
+
+for tool in flock pgrep; do command -v "$tool" >/dev/null || die "missing tool: $tool"; done
+exec 9>"$XDG_RUNTIME_DIR/anland-producer-session.lock" || die 'cannot open the session lock'
+flock -n 9 || die 'an Anland session is already running'
+for name in kwin_wayland gnome-shell niri Hyprland mango weston phoc phoc-anland; do
+    if pgrep -u "$(id -u)" -x "$name" >/dev/null; then
+        die "existing $name session detected; exit it first"
+    fi
+done
+
+for ((attempt = 0; attempt < 60; attempt++)); do
+    [[ ! -S "$ANLAND_SOCKET" || ! -e "$ANLAND_DRM_DEVICE" ]] || break
+    sleep 0.5
+done
+[[ -S "$ANLAND_SOCKET" && -r "$ANLAND_DRM_DEVICE" && -w "$ANLAND_DRM_DEVICE" ]] ||
+    die 'Anland socket or render node is unavailable'
+
+# Join the user bus when systemd --user runs one; otherwise bring our own.
+dbus_run=()
+if [[ -z ${DBUS_SESSION_BUS_ADDRESS:-} ]]; then
+    if [[ -S "$XDG_RUNTIME_DIR/bus" ]]; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+    else
+        dbus_run=(dbus-run-session --)
+    fi
+fi
+
+# phoc picks its own Wayland socket and passes it to the session.
+unset DISPLAY WAYLAND_DISPLAY
+
+# Keep the lock in this launcher only: children must not inherit fd 9, or a
+# leftover client would block the next session.
+"${dbus_run[@]}" "$COMPOSITOR" -S -C "$PHOC_INI" -E "$SESSION_COMMAND" 9>&- &
+child=$!
+forward() { kill -TERM "$child" 2>/dev/null || true; }
+trap forward INT QUIT TERM HUP
+rc=0
+while :; do
+    wait "$child" && { rc=0; break; }
+    rc=$?
+    kill -0 "$child" 2>/dev/null || break
+done
+trap - INT QUIT TERM HUP
+exit "$rc"

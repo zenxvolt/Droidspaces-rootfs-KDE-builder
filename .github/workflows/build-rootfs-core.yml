@@ -254,7 +254,7 @@ jobs:
             fi
 
             case "$DESKTOP" in
-              kde-mobile|gnome|anland-next|niri|hyprland|mango|denial)
+              kde-mobile|gnome|anland-next|niri|hyprland|mango|denial|phosh)
                 DISPLAY_BACKEND="anland-wayland"
                 ;;
             esac
