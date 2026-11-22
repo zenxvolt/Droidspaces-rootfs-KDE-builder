@@ -38,6 +38,7 @@ on:
           - Hyprland
           - Mango
           - Denial
+          - Phosh
       extra_desktops:
         description: "额外桌面，用逗号分隔（例如 Niri,Hyprland）"
         required: false
@@ -49,7 +50,7 @@ on:
         type: boolean
         default: true
       display_backend:
-        description: 显示后端（KDE mobile/GNOME/Anland Next/Niri/Hyprland/Mango/Denial 固定使用 Anland Wayland）
+        description: 显示后端（KDE mobile/GNOME/Anland Next/Niri/Hyprland/Mango/Denial/Phosh 固定使用 Anland Wayland）
         required: true
         type: choice
         default: anland-wayland

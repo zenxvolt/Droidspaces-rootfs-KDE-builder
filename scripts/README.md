@@ -22,6 +22,7 @@
 | `tui/install-anland-next.sh` | ARM64 Debian/Ubuntu/Fedora/Arch 容器 | 安装 Anland Next session 包（mini-wm + patched Xwayland + patched bubblewrap）。 |
 | `tui/install-anland-niri.sh` | ARM64 Debian 13、Ubuntu 26、Fedora 43/44、Arch 容器 | 安装 Anland Niri 与共享的 patched Xwayland 包。 |
 | `tui/install-anland-hyprland.sh`、`install-anland-mango.sh`、`install-anland-denial.sh` | ARM64 Debian 13、Ubuntu 26、Fedora 43/44、Arch 容器 | 安装对应 compositor 与 patched Xwayland 包。 |
+| `anland/install-anland-phosh.sh`、`anland/build-phoc-anland.sh` | Fedora 44 RootFS 构建环境 | Phosh 没有预编译包：构建时编译带 Anland 后端的 phoc（`/usr/libexec/phoc-anland`），安装 `phosh-anland` 启动器后移除工具链。见 [Phosh 文档（英文）](../docs/en/phosh.md)。 |
 | `install-anland-desktop.sh` | RootFS 构建环境 | 根据桌面 slug 分发到 KDE、GNOME、Niri、Hyprland、Mango、Denial 或 Anland Next 安装器。 |
 | `lib/anland-build.sh` | RootFS 构建宿主 | 为 native/QEMU 构建统一解析 Anland 包族、Release tag 和 revision。 |
 | `install-usb-manager.sh` | Linux 容器 | 安装 Droidspaces USB Manager、发行版依赖、菜单入口和用户权限。 |

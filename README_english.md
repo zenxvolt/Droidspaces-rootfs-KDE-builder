@@ -2,7 +2,7 @@ English | [中文](README.md)
 
 # Droidspaces RootFS Builder
 
-Build ARM64 Linux RootFS images for Droidspaces on Android with GitHub Actions. Choose Debian, Ubuntu, Fedora, or Arch Linux, select KDE, KDE Mobile, GNOME, Anland Next, Niri, Hyprland, Mango, Denial, or command-line mode, then import the generated `.tar.xz` archive into Droidspaces.
+Build ARM64 Linux RootFS images for Droidspaces on Android with GitHub Actions. Choose Debian, Ubuntu, Fedora, or Arch Linux, select KDE, KDE Mobile, GNOME, Anland Next, Niri, Hyprland, Mango, Denial, Phosh (Fedora 44 only, experimental), or command-line mode, then import the generated `.tar.xz` archive into Droidspaces.
 
 ![Debian 13 KDE running with Anland Wayland](docs/images/debian-kde-wayland.jpg)
 
@@ -24,6 +24,7 @@ Subscribe to the rolling desktop feed in Droidspaces: [Chinese RootFS (GitHub)](
 - [Desktop startup and Anland Wayland setup](docs/en/desktop-and-anland.md)
 - [TUI, USB, firmware, and local builds](docs/en/advanced-usage.md)
 - [Waydroid (Android) as a RootFS, shown through Anland — experimental](docs/en/waydroid.md)
+- [Phosh phone shell on Fedora 44, shown through Anland — experimental](docs/en/phosh.md)
 - [Script maintenance guide](scripts/README_english.md)
 
 ## Targets

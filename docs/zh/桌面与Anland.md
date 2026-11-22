@@ -17,6 +17,7 @@
 | Hyprland | `/usr/bin/hyprland-anland` |
 | Mango | `/usr/bin/mango-anland` |
 | Denial | `/usr/bin/denial-anland` |
+| Phosh（Fedora 44） | `/usr/bin/phosh-anland` |
 
 服务在桌面异常退出后等待 2 秒重启；60 秒内连续失败超过 5 次会暂停重试。正常退出不会触发重启。
 

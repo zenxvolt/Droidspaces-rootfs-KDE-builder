@@ -12,6 +12,8 @@ anland_package_family() {
         # 正好是 anland-${family}-packages / anland-${family}-manifest 的形状。
         anland-next) printf '%s\n' session ;;
         niri|hyprland|mango|denial) printf '%s\n' "$desktop" ;;
+        # Phosh 没有预编译包 Release：install-anland-phosh 在构建时编译 phoc-anland。
+        phosh) return 1 ;;
         *) return 1 ;;
     esac
 }

@@ -1,0 +1,180 @@
+diff --git a/meson_options.txt b/meson_options.txt
+index b86f6b4..68aff54 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -29,3 +29,7 @@ option('sysprof',
+ option('dev-uid',
+        type: 'integer', value: 1000,
+        description: 'User id for phoc development')
++
++option('anland',
++       type: 'feature', value: 'disabled',
++       description: 'Build the Anland backend (show the session in the Anland Android app)')
+diff --git a/src/meson.build b/src/meson.build
+index 928c451..8ead85f 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -203,6 +203,41 @@ if have_xwayland
+   phoc_deps += dependency('xcb')
+ endif
+ 
++if get_option('anland').enabled()
++  # The backend comes unmodified from Anland's Mango producer. It is built on
++  # its own so phoc's stricter warning set does not apply to foreign code.
++  display_producer_dep = dependency('display-producer')
++  phoc_anland_backend = static_library(
++    'phoc-anland-backend',
++    files(
++      'anland_backend/anland.c',
++      'anland_backend/buffer.c',
++      'anland_backend/clipboard.c',
++      'anland_backend/input.c',
++      'anland_backend/output.c',
++      'anland_backend/text.c',
++    ),
++    include_directories: include_directories('anland/compat', 'anland_backend'),
++    c_args: cc.get_supported_arguments(
++      '-DHAVE_ANLAND',
++      '-fno-analyzer',
++      '-Wno-error',
++      '-Wno-missing-declarations',
++      '-Wno-shadow',
++      '-Wno-switch-default',
++      '-Wno-undef',
++    ),
++    dependencies: [display_producer_dep, drm, wayland_server, wlroots, xkbcommon],
++  )
++  sources += files('anland/phoc-anland.c', 'anland/phoc-anland.h')
++  phoc_deps += declare_dependency(
++    compile_args: '-DHAVE_ANLAND',
++    include_directories: include_directories('anland', 'anland/compat'),
++    link_with: phoc_anland_backend,
++    dependencies: display_producer_dep,
++  )
++endif
++
+ phoc_lib = both_libraries(
+   'phoc',
+   sources,
+diff --git a/src/output.c b/src/output.c
+index d95d6db..804dc1c 100644
+--- a/src/output.c
++++ b/src/output.c
+@@ -21,6 +21,9 @@
+ #include "surface.h"
+ #include "utils.h"
+ #include "xwayland-surface.h"
++#ifdef HAVE_ANLAND
++# include "phoc-anland.h"
++#endif
+ 
+ #include <stdbool.h>
+ #include <stdlib.h>
+@@ -565,6 +568,8 @@ phoc_output_draw (PhocOutput *self)
+   struct wlr_buffer *buffer;
+   struct wlr_render_pass *render_pass;
+   struct wlr_output_state pending = { 0 };
++  struct wlr_swapchain *swapchain = NULL;
++  gboolean anland = FALSE;
+   PhocServerDebugFlags flags;
+ 
+   if (!wlr_output->enabled)
+@@ -577,22 +582,48 @@ phoc_output_draw (PhocOutput *self)
+   if (!needs_frame)
+     return;
+ 
+-  if (G_UNLIKELY (priv->gamma_lut_changed))
+-    phoc_output_set_gamma_lut (self, &pending);
++#ifdef HAVE_ANLAND
++  anland = mango_anland_output_is (wlr_output);
++#endif
++
++  if (G_UNLIKELY (priv->gamma_lut_changed)) {
++    /* Anland cannot apply gamma tables. Drop the request rather than
++     * failing every following commit. */
++    if (anland)
++      priv->gamma_lut_changed = FALSE;
++    else
++      phoc_output_set_gamma_lut (self, &pending);
++  }
+ 
+   wlr_output_state_set_damage (&pending, &priv->damage_ring.current);
+ 
+-  /* Check if we can delegate the fullscreen surface to the output */
+-  if (self->fullscreen_view)
++  /* Check if we can delegate the fullscreen surface to the output.
++   * Anland only accepts its own buffers, so never try there. */
++  if (self->fullscreen_view && !anland)
+     scanned_out = scan_out_fullscreen_view (self, self->fullscreen_view, &pending);
+ 
+   if (scanned_out)
+     goto out;
+ 
+-  if (!wlr_output_configure_primary_swapchain (wlr_output, &pending, &wlr_output->swapchain))
++  if (anland) {
++#ifdef HAVE_ANLAND
++    /* Render into the Android app's buffers. They do not keep their
++     * contents between frames, so always repaint everything. */
++    swapchain = mango_anland_output_swapchain (wlr_output);
++    wlr_damage_ring_add_whole (&priv->damage_ring);
++#endif
++  } else {
++    if (!wlr_output_configure_primary_swapchain (wlr_output, &pending, &wlr_output->swapchain))
++      goto out;
++    swapchain = wlr_output->swapchain;
++  }
++
++  /* No swapchain while the Anland app is disconnected, and no free buffer
++   * until it hands one back. The backend sends a frame event when it does. */
++  if (!swapchain)
+     goto out;
+ 
+-  buffer = wlr_swapchain_acquire (wlr_output->swapchain);
++  buffer = wlr_swapchain_acquire (swapchain);
+   if (!buffer)
+     goto out;
+ 
+@@ -767,6 +798,11 @@ phoc_output_compute_scale (PhocOutput *self, struct wlr_output_state *pending)
+ {
+   int32_t width = 0, height = 0;
+ 
++#ifdef HAVE_ANLAND
++  if (mango_anland_output_is (self->wlr_output))
++    return phoc_anland_output_compute_scale (self->wlr_output);
++#endif
++
+   if (!self->wlr_output->phys_width || !self->wlr_output->phys_height) {
+     g_message ("Output '%s' has invalid physical size, "
+                "using default scale", self->wlr_output->name);
+diff --git a/src/server.c b/src/server.c
+index 6d730bb..5fcdd47 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -20,6 +20,9 @@
+ #include "xdg-dialog.h"
+ #include "xdg-toplevel.h"
+ #include "xdg-toplevel-decoration.h"
++#ifdef HAVE_ANLAND
++# include "phoc-anland.h"
++#endif
+ 
+ #include <gmobile.h>
+ 
+@@ -449,6 +452,17 @@ phoc_server_initable_init (GInitable    *initable,
+   wl_display_set_global_filter (self->wl_display, phoc_server_filter_globals, self);
+   wl_display_set_default_max_buffer_size (self->wl_display, 1024 * 1024);
+ 
++#ifdef HAVE_ANLAND
++  const char *anland_socket = g_getenv ("ANLAND_SOCKET");
++
++  if (anland_socket && *anland_socket) {
++    g_message ("Using the Anland backend on %s", anland_socket);
++    self->session = NULL;
++    self->backend = phoc_anland_backend_create (self,
++                                                wl_display_get_event_loop (self->wl_display),
++                                                anland_socket);
++  } else
++#endif
+   self->backend = wlr_backend_autocreate (wl_display_get_event_loop (self->wl_display),
+                                           &self->session);
+   if (self->backend == NULL) {

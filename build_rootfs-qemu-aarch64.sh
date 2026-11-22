@@ -36,7 +36,7 @@ while getopts "i:v:K:L:B:P:a:b:c:d:e:f:g:h:n:S:t:u:A:" opt; do
     t) ENABLE_8gen2_wayland="$OPTARG" ;; # 修复骁龙8 Gen 2 Wayland 花屏
     u) USERNAME="$OPTARG" ;; 
     A) LEGACY_ANLAND_INPUT="$OPTARG" ;; # 兼容旧参数
-    *) echo "用法: $0 -i <template.Dockerfile> -K <none|KDE|'KDE mobile'|GNOME> [-B <x11|anland-wayland>]" ; exit 1 ;;
+    *) echo "用法: $0 -i <template.Dockerfile> -K <none|KDE|'KDE mobile'|GNOME|Phosh> [-B <x11|anland-wayland>]" ; exit 1 ;;
   esac
 done
 
@@ -83,7 +83,8 @@ case "$ENABLE_systemd257" in
 esac
 
 if [[ "$DESKTOP" == kde-mobile || "$DESKTOP" == gnome || "$DESKTOP" == anland-next || \
-      "$DESKTOP" == niri || "$DESKTOP" == hyprland || "$DESKTOP" == mango || "$DESKTOP" == denial ]]; then
+      "$DESKTOP" == niri || "$DESKTOP" == hyprland || "$DESKTOP" == mango || "$DESKTOP" == denial || \
+      "$DESKTOP" == phosh ]]; then
   DISPLAY_BACKEND="anland-wayland"
 fi
 if [[ "$DISPLAY_BACKEND" == anland-wayland ]]; then

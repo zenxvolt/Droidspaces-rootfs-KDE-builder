@@ -13,6 +13,8 @@ case "$desktop" in
     hyprland) installer="/usr/local/sbin/install-anland-hyprland" ;;
     mango) installer="/usr/local/sbin/install-anland-mango" ;;
     denial) installer="/usr/local/sbin/install-anland-denial" ;;
+    # No prebuilt phoc package exists; this one compiles phoc-anland.
+    phosh) installer="/usr/local/sbin/install-anland-phosh" ;;
     *)
         echo "桌面 $desktop 没有 Anland 软件包安装器。" >&2
         exit 1

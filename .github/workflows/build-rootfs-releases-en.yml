@@ -38,6 +38,7 @@ on:
           - Hyprland
           - Mango
           - Denial
+          - Phosh
       extra_desktops:
         description: "Extra desktops, comma-separated (e.g. Niri,Hyprland)"
         required: false
@@ -49,7 +50,7 @@ on:
         type: boolean
         default: true
       display_backend:
-        description: Display backend (Arch KDE and KDE mobile/GNOME/Anland Next/Niri/Hyprland/Mango/Denial always use Anland Wayland)
+        description: Display backend (Arch KDE and KDE mobile/GNOME/Anland Next/Niri/Hyprland/Mango/Denial/Phosh always use Anland Wayland)
         required: true
         type: choice
         default: x11

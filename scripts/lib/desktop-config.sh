@@ -11,6 +11,7 @@ desktop_normalize() {
         Hyprland|hyprland) printf '%s\n' hyprland ;;
         Mango|mango) printf '%s\n' mango ;;
         Denial|denial) printf '%s\n' denial ;;
+        Phosh|phosh) printf '%s\n' phosh ;;
         *) return 1 ;;
     esac
 }
@@ -26,6 +27,7 @@ desktop_label() {
         hyprland) printf '%s\n' Hyprland ;;
         mango) printf '%s\n' Mango ;;
         denial) printf '%s\n' Denial ;;
+        phosh) printf '%s\n' Phosh ;;
         *) return 1 ;;
     esac
 }
@@ -78,6 +80,10 @@ desktop_target_supported() {
         niri|hyprland|mango|denial)
             case "$target" in Debian-13|Ubuntu-26|Fedora-43|Fedora-44|Arch) return 0 ;; *) return 1 ;; esac
             ;;
+        # phoc-anland is built for Fedora 44's phoc 0.57 (wlroots 0.20).
+        phosh)
+            case "$target" in Fedora-44) return 0 ;; *) return 1 ;; esac
+            ;;
         *) return 1 ;;
     esac
 }
@@ -114,6 +120,9 @@ desktop_backend_supported() {
         niri:anland-wayland|hyprland:anland-wayland|mango:anland-wayland|denial:anland-wayland)
             case "$target" in Debian-13|Ubuntu-26|Fedora-43|Fedora-44|Arch) return 0 ;; *) return 1 ;; esac
             ;;
+        phosh:anland-wayland)
+            case "$target" in Fedora-44) return 0 ;; *) return 1 ;; esac
+            ;;
         *) return 1 ;;
     esac
 }
@@ -125,6 +134,9 @@ desktop_wayland_targets_json() {
             ;;
         gnome|niri|hyprland|mango|denial)
             printf '%s\n' '["Debian-13","Ubuntu-26","Fedora-43","Fedora-44","Arch"]'
+            ;;
+        phosh)
+            printf '%s\n' '["Fedora-44"]'
             ;;
         *) return 1 ;;
     esac

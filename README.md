@@ -2,7 +2,7 @@
 
 # Droidspaces RootFS 自动构建
 
-通过 GitHub Actions 为 Android 上的 Droidspaces 构建 Debian、Ubuntu、Fedora 或 Arch Linux ARM64 RootFS。可选择 KDE、KDE Mobile、GNOME、Anland Next、Niri、Hyprland、Mango、Denial 或纯命令行环境，再下载 `.tar.xz` 导入 Droidspaces。
+通过 GitHub Actions 为 Android 上的 Droidspaces 构建 Debian、Ubuntu、Fedora 或 Arch Linux ARM64 RootFS。可选择 KDE、KDE Mobile、GNOME、Anland Next、Niri、Hyprland、Mango、Denial、Phosh（仅 Fedora 44，实验性）或纯命令行环境，再下载 `.tar.xz` 导入 Droidspaces。
 
 ![Debian 13 KDE 桌面运行于 Anland Wayland](docs/images/debian-kde-wayland.jpg)
 
@@ -24,6 +24,7 @@
 - [桌面启动与 Anland Wayland 配置](docs/zh/桌面与Anland.md)
 - [TUI、USB、固件与本地构建](docs/zh/进阶使用.md)
 - [Waydroid（Android）作为 RootFS，通过 Anland 显示（实验性，英文文档）](docs/en/waydroid.md)
+- [Fedora 44 Phosh 手机界面，通过 Anland 显示（实验性，英文文档）](docs/en/phosh.md)
 - [脚本维护说明](scripts/README.md)
 
 ## 支持范围
