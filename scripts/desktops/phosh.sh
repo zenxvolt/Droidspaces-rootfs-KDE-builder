@@ -50,6 +50,15 @@ install_fedora() {
         gstreamer1-plugins-base gstreamer1-plugins-good libcanberra sound-theme-freedesktop
     # A container has no modem; Phosh would otherwise keep probing for one.
     dnf remove -y ModemManager || true
+
+    # Desktop apps such as Chrome have a minimum width larger than a phone
+    # screen (360 logical px) and would be cut off. Let phoc scale such
+    # oversized windows down; windows that fit are left alone.
+    cat > /usr/share/glib-2.0/schemas/90_droidspaces-phosh.gschema.override <<'EOF'
+[sm.puri.phoc]
+scale-to-fit=true
+EOF
+    glib-compile-schemas /usr/share/glib-2.0/schemas
 }
 
 install_profile() {
