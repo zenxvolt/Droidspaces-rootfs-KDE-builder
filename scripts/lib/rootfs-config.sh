@@ -35,6 +35,19 @@ write_rootfs_config() {
     } > "$output"
 }
 
+# 压缩格式：tar.xz（官方 Droidspaces 可导入）或 tar.zst（需要支持 zstd 的 Droidspaces）。
+rootfs_archive_format_valid() {
+    case "${1:-}" in tar.xz|tar.zst) return 0 ;; *) return 1 ;; esac
+}
+
+rootfs_archive_compress() {
+    case "${ROOTFS_ARCHIVE_FORMAT:-tar.xz}" in
+        tar.xz) xz -T0 -9 -c ;;
+        tar.zst) zstd -T0 -19 -q -c ;;
+        *) echo "不支持的归档格式：${ROOTFS_ARCHIVE_FORMAT}" >&2; return 1 ;;
+    esac
+}
+
 package_rootfs_with_config() (
     set -euo pipefail
     local archive="${1:?}" output="${2:?}"
@@ -63,12 +76,12 @@ package_rootfs_with_config() (
     config_size=$(stat -c %s "$config_dir/container.config")
     config_blocks=$((1 + (config_size + 511) / 512))
     pending_output=$(mktemp "${output}.tmp.XXXXXX")
-    # 略去小型 tar 归档的结束块，并将两部分直接流式传入 XZ。这样可避免再生成一份
+    # 略去小型 tar 归档的结束块，并将两部分直接流式传入压缩器。这样可避免再生成一份
     # 未压缩的 rootfs 副本，同时固定归档成员顺序。
     {
         dd if="$config_dir/config.tar" bs=512 count="$config_blocks" status=none &&
         cat "$archive"
-    } | xz -T0 -9 -c > "$pending_output"
+    } | rootfs_archive_compress > "$pending_output"
     mv -f "$pending_output" "$output"
     pending_output=""
     rm -f "$archive"

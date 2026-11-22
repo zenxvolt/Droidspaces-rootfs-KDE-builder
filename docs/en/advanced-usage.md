@@ -37,7 +37,7 @@ It does not run during build or container startup. Dependencies and processing d
 
 ## Local builds
 
-Local builds require Docker, Docker Buildx, and `xz`. Cross-architecture builds also need a working QEMU/binfmt environment.
+Local builds require Docker, Docker Buildx, and `xz` (or `zstd` with `-Z tar.zst`). Cross-architecture builds also need a working QEMU/binfmt environment.
 
 Native architecture example:
 
@@ -61,7 +61,7 @@ chmod +x build_rootfs-qemu-aarch64.sh
   -S false -t false -u Gold
 ```
 
-The output name resembles `Ubuntu-26-kde-Wayland-Droidspaces-rootfs-aarch64-local.tar.xz`. The scripts use short command-line options; see the beginning of `build_rootfs-native.sh` or `build_rootfs-qemu-aarch64.sh` for the option mapping.
+The output name resembles `Ubuntu-26-kde-Wayland-Droidspaces-rootfs-aarch64-local.tar.xz`; `-Z tar.zst` produces a `.tar.zst` instead. The scripts use short command-line options; see the beginning of `build_rootfs-native.sh` or `build_rootfs-qemu-aarch64.sh` for the option mapping.
 
 ## Limitations
 

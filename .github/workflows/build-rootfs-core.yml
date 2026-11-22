@@ -67,6 +67,10 @@ on:
         required: false
         type: string
         default: Goldzxcbug/droidspaces-package
+      archive_format:
+        required: false
+        type: string
+        default: tar.xz
       build_id:
         required: false
         type: string
@@ -397,7 +401,11 @@ jobs:
         env:
           ANLAND_RELEASE_REPOSITORY: ${{ inputs.wayland_package_repository }}
           CUSTOM_USERNAME: ${{ inputs.custom_username }}
+          ARCHIVE_FORMAT: ${{ inputs.archive_format }}
         run: |
+          if [ "$ARCHIVE_FORMAT" = tar.zst ] && ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y zstd
+          fi
           chmod +x build_rootfs-native.sh
           ./build_rootfs-native.sh \
             -i "${{ matrix.template }}.Dockerfile" \
@@ -417,13 +425,16 @@ jobs:
             -n "${{ inputs.nosnap }}" \
             -S "${{ inputs.enable_systemd257 }}" \
             -t "${{ inputs.enable_8gen2_wayland }}" \
-            -u "$CUSTOM_USERNAME"
+            -u "$CUSTOM_USERNAME" \
+            -Z "$ARCHIVE_FORMAT"
 
       - name: ${{ inputs.ui_language == 'zh' && '上传构建产物' || 'Upload build artifacts' }}
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.template }}-${{ matrix.desktop }}-${{ inputs.asset_variant }}-rootfs
-          path: "*.tar.xz"
+          path: |
+            *.tar.xz
+            *.tar.zst
           retention-days: 1
 
   # --------------------------------------------------------
@@ -451,7 +462,8 @@ jobs:
       - name: ${{ inputs.ui_language == 'zh' && '整理发布文件' || 'Organize release files' }}
         run: |
           mkdir -p release_assets
-          mv *.tar.xz release_assets/
+          mv *.tar.xz *.tar.zst release_assets/ 2>/dev/null || true
+          ls release_assets/*.tar.* >/dev/null
 
       - name: ${{ inputs.ui_language == 'zh' && '生成发布说明' || 'Prepare Release notes' }}
         env:

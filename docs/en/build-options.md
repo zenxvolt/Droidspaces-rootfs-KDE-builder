@@ -51,6 +51,7 @@ Choose the target, desktop, display backend, and optional features on the GitHub
 | `enable_zip` | `true` / `false`; default `true` | Installs common compression tools. |
 | `enable_docker` | `true` / `false`; default `false` | Installs Docker packages in the RootFS. |
 | `wayland_package_repository` | Public `owner/repository`; default `Goldzxcbug/droidspaces-package` | Selects the source for prebuilt Anland package Releases. |
+| `archive_format` | `tar.zst` / `tar.xz`; default `tar.zst` | Archive format of the RootFS. The official Droidspaces app imports only `.tar.xz` and `.tar.gz`; choose `tar.zst` only for a Droidspaces build that can import zstd. The `all-wayland` feed always uses `tar.xz`. |
 
 For exact defaults, see `.github/workflows/build-rootfs-releases-en.yml` and `build-rootfs-releases.yml`. `enable_systemd257` is experimental and adds build time. Systems already at systemd 257 or older skip installation; details are in the [script guide](../../scripts/README_english.md).
 

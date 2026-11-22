@@ -13,7 +13,7 @@ ENABLE_8gen2_wayland="false"
 ENABLE_systemd257="false"
 DISPLAY_BACKEND_INPUT="X11"
 # 解析输入参数 (-i 指定 Dockerfile，-v 指定版本号)
-while getopts "i:v:K:L:B:P:a:b:c:d:e:f:g:h:n:S:t:u:A:" opt; do
+while getopts "i:v:K:L:B:P:a:b:c:d:e:f:g:h:n:S:t:u:A:Z:" opt; do
   case $opt in
     i) DOCKERFILE="$OPTARG" ;; # -i 参数赋值给 DOCKERFILE 变量
     v) VERSION="$OPTARG" ;;    # -v 参数赋值给 VERSION 变量
@@ -34,11 +34,22 @@ while getopts "i:v:K:L:B:P:a:b:c:d:e:f:g:h:n:S:t:u:A:" opt; do
     t) ENABLE_8gen2_wayland="$OPTARG" ;; # 修复骁龙8 Gen 2 Wayland 花屏
     u) USERNAME="$OPTARG" ;; # 自定义用户名
     A) LEGACY_ANLAND_INPUT="$OPTARG" ;; # 兼容旧参数
-    *) echo "用法: $0 -i <template.Dockerfile> -K <none|KDE|'KDE mobile'|GNOME|Phosh> [-B <x11|anland-wayland>]" ; exit 1 ;;
+    Z) ROOTFS_ARCHIVE_FORMAT="$OPTARG" ;; # 归档格式 tar.xz/tar.zst
+    *) echo "用法: $0 -i <template.Dockerfile> -K <none|KDE|'KDE mobile'|GNOME|Phosh> [-B <x11|anland-wayland>] [-Z <tar.xz|tar.zst>]" ; exit 1 ;;
   esac
 done
 
 : "${USERNAME:=Gold}"
+: "${ROOTFS_ARCHIVE_FORMAT:=tar.xz}"
+if ! rootfs_archive_format_valid "$ROOTFS_ARCHIVE_FORMAT"; then
+  echo "错误：-Z 只支持 tar.xz 或 tar.zst。" >&2
+  exit 1
+fi
+if [[ "$ROOTFS_ARCHIVE_FORMAT" == tar.zst ]] && ! command -v zstd >/dev/null 2>&1; then
+  echo "错误：tar.zst 需要 zstd。" >&2
+  exit 1
+fi
+export ROOTFS_ARCHIVE_FORMAT
 : "${ANLAND_RELEASE_REPOSITORY:=Goldzxcbug/droidspaces-package}"
 : "${ANLAND_PACKAGE_REVISION:=}"
 
@@ -129,6 +140,7 @@ echo " systemd 257 旧内核兼容：$ENABLE_systemd257"
 echo " 修复骁龙8 Gen 2 Wayland 花屏：$ENABLE_8gen2_wayland"
 echo " 桌面：$DESKTOP"
 echo " 显示后端：$DISPLAY_BACKEND"
+echo " 归档格式：$ROOTFS_ARCHIVE_FORMAT"
 echo " 桌面自启动：$DESKTOP_AUTOSTART"
 echo "========================================================="
 
@@ -170,7 +182,7 @@ if [ "$DESKTOP" = "none" ]; then
 else
   DISPLAY_LABEL="$(display_backend_label "$DISPLAY_BACKEND")"
 fi
-FINAL_NAME="${PREFIX}-${DESKTOP}-${DISPLAY_LABEL}-Droidspaces-rootfs-${ARCH}-${VERSION}.tar.xz"
+FINAL_NAME="${PREFIX}-${DESKTOP}-${DISPLAY_LABEL}-Droidspaces-rootfs-${ARCH}-${VERSION}.${ROOTFS_ARCHIVE_FORMAT}"
 
 echo "正在运行 Docker Build (原生模式)..."
 

@@ -126,6 +126,14 @@ on:
         required: true
         type: string
         default: Goldzxcbug/droidspaces-package
+      archive_format:
+        description: RootFS archive format (tar.zst needs a Droidspaces build that can import zstd)
+        required: true
+        type: choice
+        default: tar.zst
+        options:
+          - tar.zst
+          - tar.xz
 
 permissions:
   contents: write
@@ -155,3 +163,4 @@ jobs:
       enable_zip: ${{ inputs.enable_zip }}
       enable_docker: ${{ inputs.enable_docker }}
       wayland_package_repository: ${{ inputs.wayland_package_repository }}
+      archive_format: ${{ inputs.archive_format }}

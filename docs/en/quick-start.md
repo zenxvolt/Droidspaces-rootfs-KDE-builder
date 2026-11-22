@@ -11,7 +11,7 @@ In Droidspaces repository management, add [Chinese RootFS (GitHub)](https://gith
 1. Fork this repository and open its `Actions` page.
 2. Select “Build and Release Droidspaces RootFS” and click `Run workflow`.
 3. Choose a distribution, desktop, display backend, and optional features, then start the workflow.
-4. When it completes, download the `.tar.xz` archive from `Releases`.
+4. When it completes, download the archive from `Releases`. It is `.tar.zst` by default; choose `archive_format: tar.xz` for the official Droidspaces app, which cannot import zstd.
 
 A common Wayland setup uses Debian 13, Ubuntu 26, Fedora 43/44, or Arch, with desktop `KDE` and backend `anland-wayland`. You can keep the defaults for a first build. Some defaults differ between the English and Chinese workflows; see [build options](build-options.md).
 
@@ -19,7 +19,7 @@ Wayland builds use patched desktop packages published in `Goldzxcbug/droidspaces
 
 ## 2. Import into Droidspaces
 
-Create or import a container and select the downloaded `.tar.xz` as its RootFS. Enable hardware access for desktop images.
+Create or import a container and select the downloaded `.tar.xz` or `.tar.zst` as its RootFS. Enable hardware access for desktop images.
 
 - For Debian/Ubuntu, enable `noseccomp` in privileged mode and make sure the host kernel has `USER_NS`; otherwise desktop operations may lag.
 - Fedora may need hardware access enabled to avoid flicker or crashes.
