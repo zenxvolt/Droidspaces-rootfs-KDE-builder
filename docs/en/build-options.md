@@ -33,6 +33,7 @@ Choose the target, desktop, display backend, and optional features on the GitHub
 | Input | Values / default | Description |
 | --- | --- | --- |
 | `build_target` | Distribution, `all`, `all-wayland`; default `Debian-13` | Select build targets. |
+| `archive_format` | `tar.gz`, `tar.xz`, `tar.zst`. Default `tar.xz`. | Format of the generated RootFS archive. Choose `tar.gz` or `tar.xz` for direct import into Droidspaces. |
 | `custom_username` | 1–32 letters, digits, `_`, or `-`, starting with a letter or `_`; default `Gold` | Normal RootFS user. |
 | `desktop` | `none`, `KDE`, `KDE mobile`, `GNOME`, `Anland Next`, `Niri`, `Hyprland`, `Mango`, `Denial`; default `KDE` | Selects the primary desktop, i.e. the one that autostarts; `none` is command-line only. |
 | `extra_desktops` | Comma-separated desktop names, e.g. `Niri,Hyprland`; empty by default | Additional desktop profiles to build alongside the primary one; leave empty to build only the primary desktop. `none` cannot be combined with other desktops, and the option is ignored for the `all-wayland` target. |

@@ -12,8 +12,8 @@ Sync CNB manually by running the “发布全桌面 Wayland RootFS” workflow. 
 
 1. Fork this repository and open its `Actions` page.
 2. Select “Build and Release Droidspaces RootFS” and click `Run workflow`.
-3. Choose a distribution, desktop, display backend, and optional features, then start the workflow.
-4. When it completes, download the `.tar.xz` archive from `Releases`.
+3. Choose a distribution, desktop, display backend, and archive format, then start the workflow. The default archive format is `tar.xz`.
+4. When it completes, download the generated archive from `Releases`.
 
 A common Wayland setup uses Debian 13, Ubuntu 26, Fedora 43/44/45, or Arch, with desktop `KDE` and backend `anland-wayland`. You can keep the defaults for a first build. Some defaults differ between the English and Chinese workflows; see [build options](build-options.md).
 
@@ -21,7 +21,7 @@ Wayland builds use patched desktop packages published in `Goldzxcbug/droidspaces
 
 ## 2. Import into Droidspaces
 
-Create or import a container and select the downloaded `.tar.xz` as its RootFS. Enable hardware access for desktop images.
+Create or import a container and select the downloaded `.tar.xz` or `.tar.gz` as its RootFS. Enable hardware access for desktop images. [Droidspaces file import documentation](https://www.droidspaces.org/docs/installation-android.html#from-a-file)
 
 - For Debian/Ubuntu, enable `noseccomp` in privileged mode and make sure the host kernel has `USER_NS`; otherwise desktop operations may lag.
 - Fedora may need hardware access enabled to avoid flicker or crashes.

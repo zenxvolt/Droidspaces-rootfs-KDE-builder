@@ -183,7 +183,7 @@ if [ "$DESKTOP" = "none" ]; then
 else
   DISPLAY_LABEL="$(display_backend_label "$DISPLAY_BACKEND")"
 fi
-FINAL_NAME="${PREFIX}-${DESKTOP}-${DISPLAY_LABEL}-Droidspaces-rootfs-${TARGET_ARCH}-${VERSION}.tar.xz"
+FINAL_NAME="${PREFIX}-${DESKTOP}-${DISPLAY_LABEL}-Droidspaces-rootfs-${TARGET_ARCH}-${VERSION}.${ROOTFS_ARCHIVE_FORMAT:-tar.xz}"
 
 echo "正在运行 Docker Buildx ($PLATFORM 跨架构模式)..."
 
