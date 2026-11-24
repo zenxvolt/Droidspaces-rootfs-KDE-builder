@@ -10,6 +10,10 @@ on:
       build_target:
         required: true
         type: string
+      archive_format:
+        required: false
+        type: string
+        default: tar.xz
       custom_username:
         required: false
         type: string
@@ -105,6 +109,7 @@ jobs:
         id: find-templates
         env:
           BUILD_TARGET_INPUT: ${{ inputs.build_target }}
+          ROOTFS_ARCHIVE_FORMAT: ${{ inputs.archive_format }}
           CUSTOM_USERNAME: ${{ inputs.custom_username }}
           DESKTOP_AUTOSTART_INPUT: ${{ inputs.desktop_autostart }}
           DESKTOP_INPUT: ${{ inputs.desktop }}
@@ -139,6 +144,12 @@ jobs:
             message "$1" "$2" >&2
             exit 1
           }
+
+          case "$ROOTFS_ARCHIVE_FORMAT" in
+            tar.gz|tar.xz|tar.zst) ;;
+            *) fail "不支持的 RootFS 压缩包格式：$ROOTFS_ARCHIVE_FORMAT" \
+                    "Unsupported RootFS archive format: $ROOTFS_ARCHIVE_FORMAT" ;;
+          esac
 
           TARGET="$BUILD_TARGET_INPUT"
 
@@ -396,6 +407,7 @@ jobs:
       - name: ${{ inputs.ui_language == 'zh' && format('构建根文件系统（{0}/{1}）', matrix.template, matrix.desktop) || format('Build RootFS ({0}/{1})', matrix.template, matrix.desktop) }}
         env:
           ANLAND_RELEASE_REPOSITORY: ${{ inputs.wayland_package_repository }}
+          ROOTFS_ARCHIVE_FORMAT: ${{ inputs.archive_format }}
           CUSTOM_USERNAME: ${{ inputs.custom_username }}
         run: |
           chmod +x build_rootfs-native.sh
@@ -423,7 +435,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.template }}-${{ matrix.desktop }}-${{ inputs.asset_variant }}-rootfs
-          path: "*.tar.xz"
+          path: "*.${{ inputs.archive_format }}"
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 1
 
   # --------------------------------------------------------
@@ -449,9 +463,11 @@ jobs:
           merge-multiple: true
 
       - name: ${{ inputs.ui_language == 'zh' && '整理发布文件' || 'Organize release files' }}
+        env:
+          ROOTFS_ARCHIVE_FORMAT: ${{ inputs.archive_format }}
         run: |
           mkdir -p release_assets
-          mv *.tar.xz release_assets/
+          mv -- *."$ROOTFS_ARCHIVE_FORMAT" release_assets/
 
       - name: ${{ inputs.ui_language == 'zh' && '生成发布说明' || 'Prepare Release notes' }}
         env:
@@ -459,6 +475,7 @@ jobs:
           BUILD_TIME: ${{ needs.setup.outputs.build_date }}
           BUILD_TARGET: ${{ inputs.build_target }}
           BUILD_ID: ${{ needs.setup.outputs.build_id }}
+          ROOTFS_ARCHIVE_FORMAT: ${{ inputs.archive_format }}
           CUSTOM_USERNAME: ${{ inputs.custom_username }}
           DESKTOP: ${{ needs.setup.outputs.desktop }}
           DESKTOP_AUTOSTART: ${{ needs.setup.outputs.desktop_autostart }}
@@ -486,6 +503,7 @@ jobs:
           构建 ID：$BUILD_ID
 
           构建选项：
+          - **压缩包格式**：$ROOTFS_ARCHIVE_FORMAT
           - **自定义用户名**：$CUSTOM_USERNAME
           - **桌面环境**：$DESKTOP
           - **桌面开机自启动**：$DESKTOP_AUTOSTART
@@ -513,6 +531,7 @@ jobs:
           Build ID: $BUILD_ID
 
           Build Options:
+          - **Archive format**: $ROOTFS_ARCHIVE_FORMAT
           - **Custom Username**: $CUSTOM_USERNAME
           - **Desktop**: $DESKTOP
           - **Desktop auto-start**: $DESKTOP_AUTOSTART

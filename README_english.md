@@ -2,7 +2,7 @@ English | [中文](README.md)
 
 # Droidspaces RootFS Builder
 
-Build ARM64 Linux RootFS images for Droidspaces on Android with GitHub Actions. Choose Debian, Ubuntu, Fedora, or Arch Linux, select KDE, KDE Mobile, GNOME, Anland Next, Niri, Hyprland, Mango, Denial, or command-line mode, then import the generated `.tar.xz` archive into Droidspaces.
+Build ARM64 Linux RootFS images for Droidspaces on Android with GitHub Actions. Choose Debian, Ubuntu, Fedora, or Arch Linux, select KDE, KDE Mobile, GNOME, Anland Next, Niri, Hyprland, Mango, Denial, or command-line mode, then download the archive in your chosen format from `Releases`.
 
 ![Debian 13 KDE running with Anland Wayland](docs/images/debian-kde-wayland.jpg)
 

@@ -19,6 +19,15 @@ on:
           - Arch
           - all
           - all-wayland
+      archive_format:
+        description: RootFS archive format
+        required: true
+        type: choice
+        default: tar.xz
+        options:
+          - tar.gz
+          - tar.xz
+          - tar.zst
       custom_username:
         description: Custom username
         required: false
@@ -137,6 +146,7 @@ jobs:
     with:
       ui_language: en
       build_target: ${{ inputs.build_target }}
+      archive_format: ${{ inputs.archive_format }}
       custom_username: ${{ inputs.custom_username }}
       desktop: ${{ inputs.desktop }}
       extra_desktops: ${{ inputs.extra_desktops }}

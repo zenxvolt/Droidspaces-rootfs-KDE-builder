@@ -41,6 +41,13 @@ package_rootfs_with_config() (
     shift 2
     local config_dir pending_output config_size config_blocks member
     local -a old_config=()
+    local -a compressor
+    case "$output" in
+        *.tar.gz) compressor=(gzip -c) ;;
+        *.tar.xz) compressor=(xz -T0 -9 -c) ;;
+        *.tar.zst) compressor=(zstd -T0 -c) ;;
+        *) printf 'Unsupported RootFS archive format: %s\n' "$output" >&2; return 1 ;;
+    esac
     config_dir=$(mktemp -d)
     pending_output=""
     trap 'rm -rf "$config_dir"; if [[ -n "$pending_output" ]]; then rm -f "$pending_output"; fi' EXIT
@@ -63,12 +70,12 @@ package_rootfs_with_config() (
     config_size=$(stat -c %s "$config_dir/container.config")
     config_blocks=$((1 + (config_size + 511) / 512))
     pending_output=$(mktemp "${output}.tmp.XXXXXX")
-    # 略去小型 tar 归档的结束块，并将两部分直接流式传入 XZ。这样可避免再生成一份
+    # 略去小型 tar 归档的结束块，并将两部分直接流式传入压缩程序。这样可避免再生成一份
     # 未压缩的 rootfs 副本，同时固定归档成员顺序。
     {
         dd if="$config_dir/config.tar" bs=512 count="$config_blocks" status=none &&
         cat "$archive"
-    } | xz -T0 -9 -c > "$pending_output"
+    } | "${compressor[@]}" > "$pending_output"
     mv -f "$pending_output" "$output"
     pending_output=""
     rm -f "$archive"

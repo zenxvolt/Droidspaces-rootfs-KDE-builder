@@ -181,7 +181,7 @@ if [ "$DESKTOP" = "none" ]; then
 else
   DISPLAY_LABEL="$(display_backend_label "$DISPLAY_BACKEND")"
 fi
-FINAL_NAME="${PREFIX}-${DESKTOP}-${DISPLAY_LABEL}-Droidspaces-rootfs-${ARCH}-${VERSION}.tar.xz"
+FINAL_NAME="${PREFIX}-${DESKTOP}-${DISPLAY_LABEL}-Droidspaces-rootfs-${ARCH}-${VERSION}.${ROOTFS_ARCHIVE_FORMAT:-tar.xz}"
 
 echo "正在运行 Docker Build (原生模式)..."
 
